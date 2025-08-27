@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 로그 파일
+logs/
+*.log
+
+# CSV 데이터 파일
+pure_websocket_data/
+*.csv
+
+# 환경 설정
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 키움 관련 임시 파일
+nul
+
+# Claude 설정
+.claude/
