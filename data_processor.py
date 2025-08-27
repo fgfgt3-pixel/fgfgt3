@@ -241,46 +241,43 @@ class IndicatorCalculator:
         return float(np.mean(list(self.price_buffer)[-available_data:]))
     
     def _calculate_rsi14(self, current_price: float) -> float:
-        """14틱 RSI (Wilder EMA 방식)"""
+        """14틱 RSI (간소화된 방식)"""
         if len(self.price_buffer) < 2:
             return 50.0  # 기본값
         
         # 가격 변화 계산
+        if self.prev_price == 0:
+            return 50.0
+            
         price_change = current_price - self.prev_price
         
-        # Gain/Loss 값 추가
-        gain = price_change if price_change > 0 else 0
-        loss = abs(price_change) if price_change < 0 else 0
+        # Up/Down moves 버퍼에 추가 (modify2.md 제안 반영)
+        if price_change > 0:
+            self.rsi_gains.append(price_change)
+            self.rsi_losses.append(0)
+        elif price_change < 0:
+            self.rsi_gains.append(0)
+            self.rsi_losses.append(abs(price_change))
+        else:
+            self.rsi_gains.append(0)
+            self.rsi_losses.append(0)
         
-        self.rsi_gains.append(gain)
-        self.rsi_losses.append(loss)
-        
+        # 14개 데이터가 쌓이기 전까지는 기본값
         if len(self.rsi_gains) < DataConfig.RSI14_WINDOW:
             return 50.0
         
-        # Wilder EMA 방식 RSI 계산
-        if len(self.rsi_gains) == DataConfig.RSI14_WINDOW:
-            # 첫 번째 평균 (SMA)
-            avg_gain = np.mean(self.rsi_gains)
-            avg_loss = np.mean(self.rsi_losses)
-        else:
-            # 이전 평균을 가져와서 EMA 계산
-            if hasattr(self, 'prev_avg_gain') and hasattr(self, 'prev_avg_loss'):
-                period = DataConfig.RSI14_WINDOW
-                avg_gain = (self.prev_avg_gain * (period - 1) + gain) / period
-                avg_loss = (self.prev_avg_loss * (period - 1) + loss) / period
-            else:
-                avg_gain = np.mean(self.rsi_gains)
-                avg_loss = np.mean(self.rsi_losses)
+        # 최근 14틱의 평균 gain/loss 계산
+        recent_gains = list(self.rsi_gains)[-DataConfig.RSI14_WINDOW:]
+        recent_losses = list(self.rsi_losses)[-DataConfig.RSI14_WINDOW:]
         
-        # 현재 평균 저장 (다음 계산용)
-        self.prev_avg_gain = avg_gain
-        self.prev_avg_loss = avg_loss
+        avg_gain = np.mean(recent_gains)
+        avg_loss = np.mean(recent_losses)
         
+        # RSI 계산
         if avg_loss == 0:
             return 100.0
         
-        rs = avg_gain / avg_loss
+        rs = avg_gain / (avg_loss + 1e-10)  # 0으로 나누기 방지
         rsi = 100 - (100 / (1 + rs))
         
         return float(rsi)
@@ -331,36 +328,26 @@ class IndicatorCalculator:
     # ========================================================================
     
     def _calculate_vol_ratio(self, tick_data: Dict) -> float:
-        """볼륨 비율 (True Range / ATR 방식으로 개선)"""
+        """볼륨 비율 (modify2.md 제안: 현재/평균 거래량)"""
         try:
-            if len(self.high_buffer) < 2 or len(self.low_buffer) < 2:
+            current_volume = int(tick_data.get('volume', 0))
+            
+            if current_volume == 0 or len(self.volume_buffer) < 2:
                 return 1.0
             
-            # True Range 계산
-            current_high = float(tick_data.get('high_price', 0))
-            current_low = float(tick_data.get('low_price', 0))
+            # 최근 20틱의 평균 거래량 계산
+            recent_volumes = list(self.volume_buffer)[-20:] if len(self.volume_buffer) >= 20 else list(self.volume_buffer)
             
-            if current_high == 0 or current_low == 0:
+            if not recent_volumes:
+                return 1.0
+                
+            avg_volume = np.mean(recent_volumes)
+            
+            if avg_volume == 0:
                 return 1.0
             
-            # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
-            high_low = current_high - current_low
-            high_prev_close = abs(current_high - self.prev_close) if self.prev_close > 0 else high_low
-            low_prev_close = abs(current_low - self.prev_close) if self.prev_close > 0 else high_low
-            
-            true_range = max(high_low, high_prev_close, low_prev_close)
-            self.atr_buffer.append(true_range)
-            
-            # ATR 계산 (True Range의 평균)
-            if len(self.atr_buffer) < DataConfig.RSI14_WINDOW:
-                return 1.0
-            
-            atr = np.mean(self.atr_buffer)
-            if atr == 0:
-                return 1.0
-            
-            # vol_ratio = current_true_range / ATR
-            vol_ratio = true_range / atr
+            # vol_ratio = 현재 거래량 / 평균 거래량
+            vol_ratio = current_volume / avg_volume
             return float(vol_ratio)
             
         except Exception as e:

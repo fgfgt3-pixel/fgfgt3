@@ -156,10 +156,19 @@ class KiwoomDataCollector:
             current_time = time.time()
             today = datetime.now().strftime("%Y%m%d")
             
+            self.logger.info(f"[수급업데이트시작] 타이머 트리거 - 종목 {len(self.target_stocks)}개")
+            
             for stock_code in self.target_stocks:
                 # 중복 요청 방지 (1분 이내 재요청 금지)
-                if current_time - self.last_investor_update[stock_code] < 60:
+                last_update = self.last_investor_update[stock_code]
+                time_diff = current_time - last_update
+                
+                if time_diff < 60:
+                    self.logger.debug(f"[수급스킵] {stock_code}: {time_diff:.1f}초 전 요청함 (60초 대기 중)")
                     continue
+                
+                # TR 요청 로그
+                self.logger.info(f"[수급TR요청] {stock_code}: 기준일자={today}")
                 
                 # TR 요청
                 tr_inputs = {
@@ -168,15 +177,20 @@ class KiwoomDataCollector:
                     "수정주가구분": "1"
                 }
                 
-                if self.kiwoom_client.request_tr(TRCode.INVESTOR_NET_VOL, tr_inputs):
+                request_success = self.kiwoom_client.request_tr(TRCode.INVESTOR_NET_VOL, tr_inputs)
+                if request_success:
                     self.last_investor_update[stock_code] = current_time
-                    self.logger.debug(f"수급 데이터 요청: {stock_code}")
+                    self.logger.info(f"[수급TR성공] {stock_code}: TR 큐에 추가됨")
+                else:
+                    self.logger.error(f"[수급TR실패] {stock_code}: TR 요청 실패")
                 
                 # API 제한 방지 (asyncio 대신 time.sleep 사용)
                 time.sleep(0.2)
                 
         except Exception as e:
             self.logger.error(f"수급 데이터 업데이트 오류: {e}")
+            import traceback
+            self.logger.error(f"수급 업데이트 상세 오류: {traceback.format_exc()}")
     
     def request_initial_data(self):
         """초기 데이터 요청"""

@@ -373,3 +373,4 @@ elif fid == 46: self.bid1 = int(real_data)
 # data_processor.py의 calculate_indicators에 추가
 indicators['spread'] = self.kiwoom_client.ask1 - self.kiwoom_client.bid1 if hasattr(self.kiwoom_client, 'ask1') else 0
 ```
+이상 modify.md는 2025.08.27 14:30분경에 적용됨

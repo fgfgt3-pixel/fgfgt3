@@ -284,9 +284,8 @@ class KiwoomClient:
             # 실시간 데이터 수신 확인 로그 (중요!)
             self.logger.info(f"[실시간] {stock_code} {real_type} 데이터 수신")
             
-            # 모든 실시간 타입을 일단 받아보기
-            if real_type not in ["주식체결", "주식호가"]:
-                self.logger.warning(f"[실시간] 예상외 타입 수신: {real_type}")
+            # 실시간 타입별 데이터 처리 (모든 타입 로그)
+            self.logger.info(f"[실시간타입] {stock_code}: {real_type}")
             
             # 현재 시간을 HHMMSS.mmm 형식으로 생성 (시:분:초.밀리초)
             from datetime import datetime
@@ -311,14 +310,22 @@ class KiwoomClient:
                 if current_price > 0:
                     self.logger.info(f"[체결] {stock_code}: {current_price:,}원")
                         
-            elif real_type == "주식호가":
-                # 호가 데이터 추출
+            elif real_type in ["주식호가", "주식호가잔량"]:
+                # 호가 데이터 추출 (키움 API에서 실제 타입명이 다를 수 있음)
+                self.logger.info(f"[호가데이터시작] {stock_code}: {real_type}")
+                
                 for field, fid in RealDataFID.STOCK_HOGA.items():
                     try:
                         value = self.ocx.dynamicCall("GetCommRealData(QString, int)", stock_code, fid)
-                        data[field] = self.parse_real_value(value, field)
+                        parsed_value = self.parse_real_value(value, field)
+                        data[field] = parsed_value
+                        
+                        # 주요 호가 데이터 상세 로그
+                        if field in ['ask1_price', 'bid1_price', 'ask1_qty', 'bid1_qty']:
+                            self.logger.info(f"[호가파싱] {field}(FID={fid}): raw='{value}' -> parsed={parsed_value}")
+                            
                     except Exception as ex:
-                        self.logger.debug(f"호가 FID {fid} 추출 오류: {ex}")
+                        self.logger.error(f"호가 FID {fid}({field}) 추출 오류: {ex}")
                         data[field] = 0
                 
                 # spread 계산용 ask1, bid1 저장
@@ -331,13 +338,13 @@ class KiwoomClient:
                     self.bid1[stock_code] = bid1_price
                 
                 # 호가 데이터 수신 로그 (항상 출력)
-                self.logger.info(f"[호가] {stock_code}: 매도1호가 {ask1_price:,}원, 매수1호가 {bid1_price:,}원")
+                self.logger.info(f"[호가결과] {stock_code}: 매도1호가 {ask1_price:,}원, 매수1호가 {bid1_price:,}원")
                 
                 # 호가 데이터가 모두 0인 경우 경고
                 if ask1_price == 0 and bid1_price == 0:
-                    self.logger.warning(f"[호가] {stock_code}: 호가 데이터가 모두 0입니다.")
+                    self.logger.warning(f"[호가경고] {stock_code}: 호가 데이터가 모두 0입니다.")
             else:
-                self.logger.warning(f"알 수 없는 실시간 타입: {real_type}")
+                self.logger.warning(f"[미처리실시간타입] {real_type} - 데이터 무시됨")
             
             # 콜백 함수 호출
             if self.realdata_callback:
