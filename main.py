@@ -181,6 +181,10 @@ class KiwoomDataCollector:
     def on_realdata_received(self, stock_code: str, real_type: str, tick_data: Dict):
         """실시간 데이터 수신 콜백"""
         try:
+            # 데이터 수신 로그 (처음 10틱만)
+            if self.tick_counts.get(stock_code, 0) < 10:
+                self.logger.info(f"[실시간데이터수신] {stock_code} - {real_type} - 가격: {tick_data.get('current_price', 'N/A')}")
+            
             # 데이터 프로세서로 전달
             self.data_processor.process_realdata(stock_code, real_type, tick_data)
             
@@ -204,9 +208,17 @@ class KiwoomDataCollector:
     def on_indicators_calculated(self, stock_code: str, indicators: Dict):
         """34개 지표 계산 완료 콜백"""
         try:
+            # 콜백 호출 로그 (처음 5틱만)
+            if self.tick_counts.get(stock_code, 0) <= 5:
+                self.logger.info(f"[지표계산완료] {stock_code} - 지표개수: {len(indicators)} - 가격: {indicators.get('current_price', 'N/A')}")
+            
             # CSV에 저장
             if self.csv_writer:
-                self.csv_writer.write_indicators(stock_code, indicators)
+                success = self.csv_writer.write_indicators(stock_code, indicators)
+                if self.tick_counts.get(stock_code, 0) <= 5:
+                    self.logger.info(f"[CSV저장결과] {stock_code} - {'성공' if success else '실패'}")
+            else:
+                self.logger.warning("CSV writer가 None입니다!")
             
             # 주요 지표 로깅 (100틱마다)
             if self.tick_counts.get(stock_code, 0) % 100 == 0:
@@ -220,6 +232,8 @@ class KiwoomDataCollector:
             
         except Exception as e:
             self.logger.error(f"지표 저장 오류: {e}")
+            import traceback
+            self.logger.error(f"상세 오류: {traceback.format_exc()}")
     
     # ========================================================================
     # 실행 관리

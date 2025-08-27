@@ -48,7 +48,7 @@ class CSVWriter:
             Path(self.base_dir).mkdir(parents=True, exist_ok=True)
             self.logger.info(f"CSV 디렉토리 생성/확인: {self.base_dir}")
         except Exception as e:
-            self.logger.error(f"디렉토리 생성 실패: {e}")
+            self.logger.error(f"CSV 디렉토리 보장 실패: {self.base_dir}, 오류: {e}")
             raise
     
     def get_csv_filepath(self, stock_code: str) -> str:
@@ -61,6 +61,7 @@ class CSVWriter:
         """종목별 CSV 파일 초기화"""
         try:
             filepath = self.get_csv_filepath(stock_code)
+            self.logger.debug(f"CSV 초기화 시도: {stock_code}, 경로: {filepath}")
             
             # 파일 락 생성
             if stock_code not in self.file_locks:
@@ -101,6 +102,7 @@ class CSVWriter:
     def write_indicators(self, stock_code: str, indicators: Dict) -> bool:
         """34개 지표를 CSV에 저장"""
         try:
+            self.logger.debug(f"쓰기 시도: {stock_code}, 데이터 키: {list(indicators.keys())[:5]}...")
             # CSV가 초기화되지 않은 경우 초기화
             if stock_code not in self.csv_writers:
                 if not self.initialize_stock_csv(stock_code):

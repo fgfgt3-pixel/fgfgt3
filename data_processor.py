@@ -482,13 +482,24 @@ class DataProcessor:
             # 지표 계산
             indicators = self.calculators[stock_code].update_tick_data(tick_data)
             
+            # 디버깅 로그 (처음 5틱만)
+            if len(self.calculators[stock_code].price_buffer) <= 5:
+                self.logger.info(f"[DataProcessor] {stock_code} - 지표개수: {len(indicators) if indicators else 0}")
+            
             if indicators and self.indicator_callback:
                 self.indicator_callback(stock_code, indicators)
+            elif not indicators:
+                if len(self.calculators[stock_code].price_buffer) <= 5:
+                    self.logger.warning(f"[DataProcessor] {stock_code} - 빈 지표 반환됨")
+            elif not self.indicator_callback:
+                self.logger.warning(f"[DataProcessor] 콜백이 None입니다!")
             
             return indicators
             
         except Exception as e:
             self.logger.error(f"실시간 데이터 처리 오류 ({stock_code}): {e}")
+            import traceback
+            self.logger.error(f"상세 오류: {traceback.format_exc()}")
             return None
     
     def process_tr_data(self, tr_code: str, tr_data: Dict):
