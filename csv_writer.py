@@ -62,6 +62,7 @@ class CSVWriter:
         try:
             filepath = self.get_csv_filepath(stock_code)
             self.logger.debug(f"CSV 초기화 시도: {stock_code}, 경로: {filepath}")
+            self.logger.info(f"[DEBUG] CSV 초기화 진행중: {stock_code}")
             
             # 파일 락 생성
             if stock_code not in self.file_locks:
