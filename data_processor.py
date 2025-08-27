@@ -167,7 +167,7 @@ class IndicatorCalculator:
         indicators = {}
         
         # ====================================================================
-        # 1. 기본 데이터 (5개)
+        # 1. 기본 데이터 (4개)
         # ====================================================================
         indicators['time'] = current_time
         indicators['stock_code'] = self.stock_code
@@ -211,7 +211,7 @@ class IndicatorCalculator:
             indicators[f'bid{i}'] = bid_ask_data.get(f'bid{i}', 0)
         
         # ====================================================================
-        # 7. 호가 잔량 (6개) - 34개 맞추기 위해 조정
+        # 7. 호가 잔량 (6개) - 33개 맞추기 위해 조정
         # ====================================================================
         indicators['ask1_qty'] = bid_ask_data.get('ask1_qty', 0)
         indicators['ask2_qty'] = bid_ask_data.get('ask2_qty', 0)
@@ -234,9 +234,11 @@ class IndicatorCalculator:
     
     def _calculate_ma5(self) -> float:
         """5틱 이동평균"""
-        if len(self.price_buffer) < 5:
+        if len(self.price_buffer) == 0:
             return 0.0
-        return float(np.mean(list(self.price_buffer)[-5:]))
+        # 데이터가 5개 미만이면 현재까지의 평균 계산
+        available_data = min(len(self.price_buffer), 5)
+        return float(np.mean(list(self.price_buffer)[-available_data:]))
     
     def _calculate_rsi14(self, current_price: float) -> float:
         """14틱 RSI (Wilder EMA 방식)"""

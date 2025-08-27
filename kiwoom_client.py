@@ -330,9 +330,12 @@ class KiwoomClient:
                 if bid1_price > 0:
                     self.bid1[stock_code] = bid1_price
                 
-                # 매수1호가 로그
-                if bid1_price > 0:
-                    self.logger.info(f"[호가] {stock_code}: 매도1호가 {ask1_price:,}원, 매수1호가 {bid1_price:,}원")
+                # 호가 데이터 수신 로그 (항상 출력)
+                self.logger.info(f"[호가] {stock_code}: 매도1호가 {ask1_price:,}원, 매수1호가 {bid1_price:,}원")
+                
+                # 호가 데이터가 모두 0인 경우 경고
+                if ask1_price == 0 and bid1_price == 0:
+                    self.logger.warning(f"[호가] {stock_code}: 호가 데이터가 모두 0입니다.")
             else:
                 self.logger.warning(f"알 수 없는 실시간 타입: {real_type}")
             
