@@ -83,7 +83,7 @@ class KiwoomDataCollector:
             
             # 2. 데이터 프로세서 초기화
             self.logger.info("2. 데이터 프로세서 초기화")
-            self.data_processor = DataProcessor(self.target_stocks)
+            self.data_processor = DataProcessor(self.target_stocks, self.kiwoom_client)
             
             # 3. CSV 저장소 초기화
             self.logger.info("3. CSV 저장소 초기화")
@@ -124,6 +124,10 @@ class KiwoomDataCollector:
             if not self.kiwoom_client.register_realdata(self.target_stocks):
                 self.logger.error("실시간 데이터 등록 실패")
                 return False
+            
+            # 전일고가 데이터 초기 요청
+            self.logger.info("전일고가 데이터 요청...")
+            self.request_initial_data()
             
             self.logger.info("연결 및 등록 완료")
             return True
@@ -173,6 +177,20 @@ class KiwoomDataCollector:
                 
         except Exception as e:
             self.logger.error(f"수급 데이터 업데이트 오류: {e}")
+    
+    def request_initial_data(self):
+        """초기 데이터 요청 (전일고가 등)"""
+        try:
+            for stock_code in self.target_stocks:
+                # 전일고가 요청
+                if self.kiwoom_client.get_prev_day_high(stock_code):
+                    self.logger.debug(f"전일고가 요청: {stock_code}")
+                
+                # API 제한 방지
+                time.sleep(0.2)
+                
+        except Exception as e:
+            self.logger.error(f"초기 데이터 요청 오류: {e}")
     
     # ========================================================================
     # 콜백 함수들
@@ -275,6 +293,9 @@ class KiwoomDataCollector:
             
             # 주기적 상태 리포트 시작
             self.start_status_reporting()
+            
+            # 수급 데이터 주기적 업데이트 시작
+            self.start_investor_data_updates()
             
             # 이벤트 루프 실행
             if self.kiwoom_client and self.kiwoom_client.app:

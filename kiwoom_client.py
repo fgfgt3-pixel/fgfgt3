@@ -66,6 +66,13 @@ class KiwoomClient:
         self.registered_stocks = set()
         self.screen_numbers = {}    # 화면번호 관리
         
+        # 전일고가 데이터 저장
+        self.prev_day_high = {}
+        
+        # 실시간 호가 데이터
+        self.ask1 = {}
+        self.bid1 = {}
+        
         # 콜백 함수들
         self.realdata_callback: Optional[Callable] = None
         self.tr_callback: Optional[Callable] = None
@@ -314,10 +321,18 @@ class KiwoomClient:
                         self.logger.debug(f"호가 FID {fid} 추출 오류: {ex}")
                         data[field] = 0
                 
+                # spread 계산용 ask1, bid1 저장
+                ask1_price = data.get('ask1_price', 0)
+                bid1_price = data.get('bid1_price', 0)
+                
+                if ask1_price > 0:
+                    self.ask1[stock_code] = ask1_price
+                if bid1_price > 0:
+                    self.bid1[stock_code] = bid1_price
+                
                 # 매수1호가 로그
-                bid1 = data.get('bid1_price', 0)
-                if bid1 > 0:
-                    self.logger.info(f"[호가] {stock_code}: 매수1호가 {bid1:,}원")
+                if bid1_price > 0:
+                    self.logger.info(f"[호가] {stock_code}: 매도1호가 {ask1_price:,}원, 매수1호가 {bid1_price:,}원")
             else:
                 self.logger.warning(f"알 수 없는 실시간 타입: {real_type}")
             
@@ -451,10 +466,19 @@ class KiwoomClient:
         try:
             self.logger.debug(f"TR 데이터 수신: {tr_code}")
             
+            # 종목코드 추출
+            stock_code = self.screen_to_stock.get(screen_no, "")
+            
             # 수급 데이터 처리
             if tr_code == TRCode.INVESTOR_NET_VOL:
                 data = self.parse_investor_data(tr_code, rq_name)
-                data['stock_code'] = self.screen_to_stock.get(screen_no, "")  # 매핑에서 종목코드 추출
+                data['stock_code'] = stock_code
+                self.tr_results[screen_no] = data
+                
+            # 전일고가 데이터 처리
+            elif tr_code == TRCode.DAILY_STOCK:
+                data = self.parse_prev_day_high_data(tr_code, rq_name, stock_code)
+                data['stock_code'] = stock_code
                 self.tr_results[screen_no] = data
                 
             # 콜백 함수 호출
@@ -506,6 +530,45 @@ class KiwoomClient:
         except Exception as e:
             self.logger.error(f"수급 데이터 파싱 오류: {e}")
             return {}
+    
+    def get_prev_day_high(self, stock_code: str):
+        """전일고가 데이터 요청 (OPT10081 TR 사용)"""
+        try:
+            inputs = {
+                "종목코드": stock_code,
+                "기준일자": datetime.now().strftime('%Y%m%d'),
+                "수정주가구분": "1"
+            }
+            
+            self.logger.info(f"전일고가 요청: {stock_code}")
+            return self.request_tr(TRCode.DAILY_STOCK, inputs)
+            
+        except Exception as e:
+            self.logger.error(f"전일고가 요청 실패 ({stock_code}): {e}")
+            return False
+    
+    def parse_prev_day_high_data(self, tr_code: str, rq_name: str, stock_code: str) -> Dict:
+        """전일고가 데이터 파싱 (opt10081)"""
+        try:
+            # 전일고가 추출
+            high_value = self.ocx.dynamicCall(
+                "GetCommData(QString, QString, int, QString)",
+                tr_code, rq_name, 0, "전일고가"
+            ).strip()
+            
+            if high_value:
+                # 쉼표 제거 후 숫자 변환
+                prev_high = int(high_value.replace(',', ''))
+                self.prev_day_high[stock_code] = prev_high
+                self.logger.info(f"전일고가 저장: {stock_code} = {prev_high:,}원")
+                return {'prev_day_high': prev_high}
+            else:
+                self.logger.warning(f"전일고가 데이터 없음: {stock_code}")
+                return {'prev_day_high': 0}
+                
+        except Exception as e:
+            self.logger.error(f"전일고가 데이터 파싱 오류: {e}")
+            return {'prev_day_high': 0}
     
     def on_receive_msg(self, screen_no: str, rq_name: str, tr_code: str, msg: str):
         """서버 메시지 수신"""

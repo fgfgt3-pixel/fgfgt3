@@ -14,9 +14,10 @@ pip-delete-this-directory.txt
 logs/
 *.log
 
-# CSV 데이터 파일
-pure_websocket_data/
-*.csv
+# CSV 데이터 파일 (선택적 업로드)
+# pure_websocket_data/*.csv  <- CSV 업로드 허용을 위해 주석 처리
+!pure_websocket_data/sample_*.csv
+!pure_websocket_data/latest_*.csv
 
 # 환경 설정
 .env

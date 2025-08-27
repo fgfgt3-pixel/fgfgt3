@@ -22,14 +22,19 @@ class IndicatorCalculator:
     - rolling window (deque) 사용
     """
     
-    def __init__(self, stock_code: str):
+    def __init__(self, stock_code: str, kiwoom_client=None):
         self.stock_code = stock_code
+        self.kiwoom_client = kiwoom_client
         self.logger = logging.getLogger(__name__)
         
         # 틱 데이터 버퍼 (deque with maxlen)
         self.price_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
         self.volume_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
         self.time_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
+        
+        # 고가/저가 버퍼 (Stochastic 계산용)
+        self.high_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
+        self.low_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
         
         # 호가 데이터 버퍼
         self.bid_ask_buffer = deque(maxlen=100)  # 최근 100틱 호가
@@ -43,6 +48,10 @@ class IndicatorCalculator:
         
         # 스토캐스틱 계산용
         self.stoch_k_buffer = deque(maxlen=3)
+        
+        # ATR 계산용 (vol_ratio 개선용)
+        self.atr_buffer = deque(maxlen=DataConfig.RSI14_WINDOW)  # 14기간 ATR
+        self.prev_close = 0
         
         # 수급 데이터 (TR 기반)
         self.investor_net_data = {}
@@ -64,7 +73,16 @@ class IndicatorCalculator:
             Dict: 계산된 34개 지표
         """
         try:
-            current_time = tick_data.get('time', int(time.time() * 1000))
+            # time 데이터 타입 안전하게 처리
+            time_value = tick_data.get('time', int(time.time() * 1000))
+            if isinstance(time_value, str):
+                # "120205.762" 형태의 문자열을 밀리초 단위로 변환
+                try:
+                    current_time = int(float(time_value) * 1000)
+                except (ValueError, TypeError):
+                    current_time = int(time.time() * 1000)
+            else:
+                current_time = int(time_value) if time_value else int(time.time() * 1000)
             
             # kiwoom_client에서 이미 숫자로 변환된 값을 받음
             current_price = float(tick_data.get('current_price', 0))
@@ -73,10 +91,16 @@ class IndicatorCalculator:
             if current_price <= 0:
                 return {}
             
+            # 고가/저가 추출 (키움에서 제공되는 경우)
+            current_high = float(tick_data.get('high_price', current_price))
+            current_low = float(tick_data.get('low_price', current_price))
+            
             # 버퍼 업데이트
             self.price_buffer.append(current_price)
             self.volume_buffer.append(current_volume)
             self.time_buffer.append(current_time)
+            self.high_buffer.append(current_high)
+            self.low_buffer.append(current_low)
             
             # 호가 데이터 업데이트
             bid_ask_data = self._extract_bid_ask_data(tick_data)
@@ -87,6 +111,7 @@ class IndicatorCalculator:
             indicators = self._calculate_all_indicators(tick_data)
             
             # 상태 업데이트 (타입 보장)
+            self.prev_close = self.prev_price  # 이전 종가를 ATR 계산용으로 저장
             self.prev_price = float(current_price) if current_price else 0
             self.prev_volume = int(current_volume) if current_volume else 0
             self.last_update_time = current_time
@@ -125,7 +150,15 @@ class IndicatorCalculator:
     
     def _calculate_all_indicators(self, tick_data: Dict) -> Dict:
         """34개 지표 전체 계산"""
-        current_time = tick_data.get('time', int(time.time() * 1000))
+        # time 데이터 타입 안전하게 처리 (update_tick_data와 동일한 로직)
+        time_value = tick_data.get('time', int(time.time() * 1000))
+        if isinstance(time_value, str):
+            try:
+                current_time = int(float(time_value) * 1000)
+            except (ValueError, TypeError):
+                current_time = int(time.time() * 1000)
+        else:
+            current_time = int(time_value) if time_value else int(time.time() * 1000)
         
         # kiwoom_client에서 이미 숫자로 변환된 값을 받음
         current_price = float(tick_data.get('current_price', 0))
@@ -154,7 +187,7 @@ class IndicatorCalculator:
         # ====================================================================
         # 3. 볼륨 지표 (3개)
         # ====================================================================
-        indicators['vol_ratio'] = self._calculate_vol_ratio(current_volume)
+        indicators['vol_ratio'] = self._calculate_vol_ratio(tick_data)
         indicators['z_vol'] = self._calculate_z_vol(current_volume)
         indicators['obv_delta'] = self._calculate_obv_delta(current_price, current_volume)
         
@@ -207,29 +240,41 @@ class IndicatorCalculator:
         return float(np.mean(list(self.price_buffer)[-5:]))
     
     def _calculate_rsi14(self, current_price: float) -> float:
-        """14틱 RSI"""
+        """14틱 RSI (Wilder EMA 방식)"""
         if len(self.price_buffer) < 2:
             return 50.0  # 기본값
         
         # 가격 변화 계산
         price_change = current_price - self.prev_price
         
-        if price_change > 0:
-            self.rsi_gains.append(price_change)
-            self.rsi_losses.append(0)
-        elif price_change < 0:
-            self.rsi_gains.append(0)
-            self.rsi_losses.append(abs(price_change))
-        else:
-            self.rsi_gains.append(0)
-            self.rsi_losses.append(0)
+        # Gain/Loss 값 추가
+        gain = price_change if price_change > 0 else 0
+        loss = abs(price_change) if price_change < 0 else 0
+        
+        self.rsi_gains.append(gain)
+        self.rsi_losses.append(loss)
         
         if len(self.rsi_gains) < DataConfig.RSI14_WINDOW:
             return 50.0
         
-        # RSI 계산
-        avg_gain = np.mean(self.rsi_gains)
-        avg_loss = np.mean(self.rsi_losses)
+        # Wilder EMA 방식 RSI 계산
+        if len(self.rsi_gains) == DataConfig.RSI14_WINDOW:
+            # 첫 번째 평균 (SMA)
+            avg_gain = np.mean(self.rsi_gains)
+            avg_loss = np.mean(self.rsi_losses)
+        else:
+            # 이전 평균을 가져와서 EMA 계산
+            if hasattr(self, 'prev_avg_gain') and hasattr(self, 'prev_avg_loss'):
+                period = DataConfig.RSI14_WINDOW
+                avg_gain = (self.prev_avg_gain * (period - 1) + gain) / period
+                avg_loss = (self.prev_avg_loss * (period - 1) + loss) / period
+            else:
+                avg_gain = np.mean(self.rsi_gains)
+                avg_loss = np.mean(self.rsi_losses)
+        
+        # 현재 평균 저장 (다음 계산용)
+        self.prev_avg_gain = avg_gain
+        self.prev_avg_loss = avg_loss
         
         if avg_loss == 0:
             return 100.0
@@ -247,25 +292,32 @@ class IndicatorCalculator:
         return float((current_price / ma5) * 100)
     
     def _calculate_stoch_k(self, tick_data: Dict) -> float:
-        """스토캐스틱 K"""
-        if len(self.price_buffer) < DataConfig.STOCH_WINDOW:
+        """스토캐스틱 K (적절한 high/low 히스토리 사용)"""
+        if len(self.high_buffer) < DataConfig.STOCH_WINDOW or len(self.low_buffer) < DataConfig.STOCH_WINDOW:
             return 50.0
         
-        # 최근 N틱의 고가, 저가
-        recent_prices = list(self.price_buffer)[-DataConfig.STOCH_WINDOW:]
-        highest = max(recent_prices)
-        lowest = min(recent_prices)
-        
-        # kiwoom_client에서 이미 숫자로 변환된 값을 받음
-        current_price = float(tick_data.get('current_price', 0))
-        
-        if highest == lowest:
-            stoch_k = 50.0
-        else:
-            stoch_k = ((current_price - lowest) / (highest - lowest)) * 100
-        
-        self.stoch_k_buffer.append(stoch_k)
-        return float(stoch_k)
+        try:
+            # 최근 N틱의 고가, 저가
+            recent_highs = list(self.high_buffer)[-DataConfig.STOCH_WINDOW:]
+            recent_lows = list(self.low_buffer)[-DataConfig.STOCH_WINDOW:]
+            
+            highest_high = max(recent_highs)
+            lowest_low = min(recent_lows)
+            
+            # 현재가
+            current_price = float(tick_data.get('current_price', 0))
+            
+            if highest_high == lowest_low:
+                stoch_k = 50.0
+            else:
+                stoch_k = ((current_price - lowest_low) / (highest_high - lowest_low)) * 100
+            
+            self.stoch_k_buffer.append(stoch_k)
+            return float(stoch_k)
+            
+        except Exception as e:
+            self.logger.error(f"Stoch K 계산 실패: {e}")
+            return 50.0
     
     def _calculate_stoch_d(self) -> float:
         """스토캐스틱 D (K의 3틱 이동평균)"""
@@ -277,21 +329,42 @@ class IndicatorCalculator:
     # 볼륨 지표 계산 함수들
     # ========================================================================
     
-    def _calculate_vol_ratio(self, current_volume: int) -> float:
-        """거래량 비율 (현재 틱 거래량 / 평균 거래량)"""
-        if len(self.volume_buffer) < 10:
-            return 1.0
-        
-        avg_volume = np.mean(self.volume_buffer)
-        if avg_volume == 0:
-            return 1.0
+    def _calculate_vol_ratio(self, tick_data: Dict) -> float:
+        """볼륨 비율 (True Range / ATR 방식으로 개선)"""
+        try:
+            if len(self.high_buffer) < 2 or len(self.low_buffer) < 2:
+                return 1.0
             
-        # 누적거래량에서 이전 누적거래량을 빼서 틱 거래량 계산
-        tick_volume = current_volume - self.prev_volume if self.prev_volume > 0 else 0
-        if tick_volume <= 0:
-            return 1.0
+            # True Range 계산
+            current_high = float(tick_data.get('high_price', 0))
+            current_low = float(tick_data.get('low_price', 0))
             
-        return float(tick_volume / avg_volume)
+            if current_high == 0 or current_low == 0:
+                return 1.0
+            
+            # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+            high_low = current_high - current_low
+            high_prev_close = abs(current_high - self.prev_close) if self.prev_close > 0 else high_low
+            low_prev_close = abs(current_low - self.prev_close) if self.prev_close > 0 else high_low
+            
+            true_range = max(high_low, high_prev_close, low_prev_close)
+            self.atr_buffer.append(true_range)
+            
+            # ATR 계산 (True Range의 평균)
+            if len(self.atr_buffer) < DataConfig.RSI14_WINDOW:
+                return 1.0
+            
+            atr = np.mean(self.atr_buffer)
+            if atr == 0:
+                return 1.0
+            
+            # vol_ratio = current_true_range / ATR
+            vol_ratio = true_range / atr
+            return float(vol_ratio)
+            
+        except Exception as e:
+            self.logger.error(f"vol_ratio 계산 실패: {e}")
+            return 1.0
     
     def _calculate_z_vol(self, current_volume: int) -> float:
         """거래량 Z-Score"""
@@ -331,15 +404,24 @@ class IndicatorCalculator:
     # ========================================================================
     
     def _calculate_spread(self) -> float:
-        """스프레드 (ask1 - bid1)"""
-        if not self.bid_ask_buffer:
+        """스프레드 (ask1 - bid1) - 실시간 호가 데이터 사용"""
+        try:
+            if not self.kiwoom_client:
+                return 0.0
+            
+            # kiwoom_client의 실시간 호가 데이터 사용
+            ask1_price = self.kiwoom_client.ask1.get(self.stock_code, 0)
+            bid1_price = self.kiwoom_client.bid1.get(self.stock_code, 0)
+            
+            if ask1_price > 0 and bid1_price > 0:
+                spread = ask1_price - bid1_price
+                return float(spread)
+            
             return 0.0
-        
-        latest_hoga = self.bid_ask_buffer[-1]
-        ask1 = latest_hoga.get('ask1', 0)
-        bid1 = latest_hoga.get('bid1', 0)
-        
-        return float(ask1 - bid1)
+            
+        except Exception as e:
+            self.logger.error(f"spread 계산 실패: {e}")
+            return 0.0
     
     def _calculate_bid_ask_imbalance(self) -> float:
         """호가 불균형 (bid_qty - ask_qty) / total"""
@@ -458,14 +540,15 @@ class DataProcessor:
     - TR 데이터 처리
     """
     
-    def __init__(self, target_stocks: List[str] = None):
+    def __init__(self, target_stocks: List[str] = None, kiwoom_client=None):
         self.target_stocks = target_stocks or TARGET_STOCKS
+        self.kiwoom_client = kiwoom_client
         self.logger = logging.getLogger(__name__)
         
         # 종목별 계산기 생성
         self.calculators: Dict[str, IndicatorCalculator] = {}
         for stock_code in self.target_stocks:
-            self.calculators[stock_code] = IndicatorCalculator(stock_code)
+            self.calculators[stock_code] = IndicatorCalculator(stock_code, kiwoom_client)
         
         # 콜백 함수
         self.indicator_callback: Optional[callable] = None
@@ -503,13 +586,22 @@ class DataProcessor:
             return None
     
     def process_tr_data(self, tr_code: str, tr_data: Dict):
-        """TR 데이터 처리 (수급 데이터 등)"""
+        """TR 데이터 처리 (수급 데이터, 전일고가 등)"""
         try:
             if tr_code == "OPT10059":
                 # 수급 데이터를 해당 종목에 업데이트
                 stock_code = tr_data.get('stock_code')
                 if stock_code and stock_code in self.calculators:
                     self.calculators[stock_code].update_investor_data(tr_data)
+                    
+            elif tr_code == "opt10081":
+                # 전일고가 데이터를 해당 종목에 업데이트
+                stock_code = tr_data.get('stock_code')
+                if stock_code and stock_code in self.calculators:
+                    prev_high = tr_data.get('prev_day_high', 0)
+                    if prev_high > 0:
+                        self.calculators[stock_code].set_prev_day_high(prev_high)
+                        self.logger.info(f"전일고가 설정: {stock_code} = {prev_high:,}원")
                     
         except Exception as e:
             self.logger.error(f"TR 데이터 처리 오류: {e}")
