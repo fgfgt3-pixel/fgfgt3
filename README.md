@@ -39,6 +39,21 @@ C:\python38_32bit\python.exe run.py
 - **Python**: 32비트 Python 3.8 권장
 - **API**: 키움 Open API+ (실전 서버)
 
+## 🔍 최근 업데이트 (2025-08-27)
+### CSV 파일 생성 문제 진단 완료
+- **결론**: CSV 생성 코드는 정상 작동 ✅
+- **실제 원인**: Kiwoom API 연결 또는 실시간 데이터 수신 문제
+- **추가된 도구**:
+  - `test_csv_writer.py` - CSV Writer 독립 테스트
+  - `test_data_flow.py` - 전체 파이프라인 테스트 
+  - `test_connection.py` - Kiwoom API 연결 테스트
+  - 디버깅 로그 강화 (main.py, data_processor.py, csv_writer.py)
+
+### 진단 단계
+1. `simple_csv_test.py` 실행 → CSV 기능 확인
+2. `test_data_flow.py` 실행 → 전체 파이프라인 확인
+3. `test_connection.py` 실행 → API 연결 상태 확인
+
 ## 📝 개발 지침
 모든 코드 수정은 `CLAUDE.md` 파일의 지침을 따라야 합니다.
 
