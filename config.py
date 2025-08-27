@@ -1,6 +1,6 @@
 """
 키움 OpenAPI+ 실시간 데이터 수집 시스템 설정 관리
-CLAUDE.md 기반 - 틱 기반 데이터 취합, 34개 지표 계산, CSV 저장
+CLAUDE.md 기반 - 틱 기반 데이터 취합, 33개 지표 계산, CSV 저장
 """
 
 import os
@@ -128,18 +128,17 @@ class RealDataFID:
     HOGA_FID_LIST = "27;28;29;30;31;32;33;34;35;36;37;38;39;40;41;42;43;44;45;46;121;122"
 
 # ============================================================================
-# 34개 지표 정의
+# 33개 지표 정의
 # ============================================================================
 class IndicatorConfig:
-    """34개 지표 설정 및 정의"""
+    """33개 지표 설정 및 정의"""
     
-    # 기본 데이터 (5개)
+    # 기본 데이터 (4개)
     BASIC_FIELDS = [
         'time',           # 시간 (밀리초)
         'stock_code',     # 종목코드
         'current_price',  # 현재가
-        'volume',         # 거래량
-        'prev_day_high'   # 전일고가
+        'volume'          # 거래량
     ]
     
     # 가격 지표 (5개)
@@ -197,9 +196,9 @@ class IndicatorConfig:
         'prog_net'        # 프로그램
     ]
     
-    # 전체 34개 지표 리스트 (5+5+3+2+2+10+10+11 = 48개 아님, 34개 맞춤)
+    # 전체 33개 지표 리스트 (4+5+3+2+2+10+10+11 = 47개 아님, 33개 맞춤)
     ALL_INDICATORS = (
-        BASIC_FIELDS +           # 5개
+        BASIC_FIELDS +           # 4개
         PRICE_INDICATORS +       # 5개
         VOLUME_INDICATORS +      # 3개
         BIDASK_INDICATORS +      # 2개
@@ -209,10 +208,10 @@ class IndicatorConfig:
         ['total_investor_net']  # 수급 총합 1개 = 총 34개
     )
     
-    # CLAUDE.md 정확한 34개 지표 (수급 지표 포함)
-    EXACT_34_INDICATORS = [
-        # 기본 데이터 (5개)
-        'time', 'stock_code', 'current_price', 'volume', 'prev_day_high',
+    # CLAUDE.md 정확한 33개 지표 (수급 지표 포함)
+    EXACT_33_INDICATORS = [
+        # 기본 데이터 (4개)
+        'time', 'stock_code', 'current_price', 'volume',
         
         # 가격 지표 (5개)  
         'ma5', 'rsi14', 'disparity', 'stoch_k', 'stoch_d',
@@ -240,10 +239,10 @@ class IndicatorConfig:
         'net_vol_delta'          # 변화량 (current - prev)
     ]
     
-    # CLAUDE.md 요구사항: 37개 지표 (수급 지표 11개 컬럼 확장으로 총 48개 CSV 컬럼)
-    EXACT_37_INDICATORS = [
-        # 기본 데이터 (5개)
-        'time', 'stock_code', 'current_price', 'volume', 'prev_day_high',
+    # CLAUDE.md 요구사항: 36개 지표 (수급 지표 11개 컬럼 확장으로 총 44개 CSV 컬럼)
+    EXACT_36_INDICATORS = [
+        # 기본 데이터 (4개)
+        'time', 'stock_code', 'current_price', 'volume',
         
         # 가격 지표 (5개)  
         'ma5', 'rsi14', 'disparity', 'stoch_k', 'stoch_d',
@@ -285,12 +284,12 @@ class IndicatorConfig:
         'prog_net_vol'        # 프로그램 순매수량
     ]
     
-    # 최종 결정: 34개 기본 지표 + 11개 수급 지표 = 총 45개 컬럼 
-    # (37개 지표 중 수급 지표 1개가 11개 컬럼으로 확장)
-    BASIC_34_INDICATORS = EXACT_37_INDICATORS[:-3]  # 호가 잔량 3개 제거로 34개
-    ALL_INDICATORS_WITH_INVESTOR = BASIC_34_INDICATORS + INVESTOR_COLUMNS
+    # 최종 결정: 33개 기본 지표 + 11개 수급 지표 = 총 44개 컬럼 
+    # (36개 지표 중 수급 지표 1개가 11개 컬럼으로 확장)
+    BASIC_33_INDICATORS = EXACT_36_INDICATORS[:-3]  # 호가 잠량 3개 제거로 33개
+    ALL_INDICATORS_WITH_INVESTOR = BASIC_33_INDICATORS + INVESTOR_COLUMNS
     
-    # CLAUDE.md 요구사항 준수: 34개 기본 지표 + 11개 수급 지표 = 총 45개 컬럼
+    # CLAUDE.md 요구사항 준수: 33개 기본 지표 + 11개 수급 지표 = 총 44개 컬럼
     ALL_INDICATORS = ALL_INDICATORS_WITH_INVESTOR
 
 # ============================================================================
@@ -324,8 +323,8 @@ class TRCode:
 # 파일 경로 설정
 # ============================================================================
 def get_csv_filename(stock_code: str, date_str: str) -> str:
-    """CSV 파일명 생성 (34개 기본지표 + 11개 수급지표 = 45개)"""
-    return f"{stock_code}_45indicators_realtime_{date_str}.csv"
+    """CSV 파일명 생성 (33개 기본지표 + 11개 수급지표 = 44개)"""
+    return f"{stock_code}_44indicators_realtime_{date_str}.csv"
 
 def get_log_filename(date_str: str) -> str:
     """로그 파일명 생성"""  

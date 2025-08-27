@@ -73,7 +73,6 @@ def test_csv_writer():
             'stock_code': stock_code,
             'current_price': 70500.0,
             'volume': 1000000,
-            'prev_day_high': 71000.0,
             'ma5': 70400.0,
             'rsi14': 55.5,
             'disparity': 1.02,

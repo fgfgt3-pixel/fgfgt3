@@ -64,7 +64,6 @@ def test_data_flow():
                 'bid1': base_price + i * 100 - 50,
                 'ask1_qty': 100 + i * 10,
                 'bid1_qty': 120 + i * 5,
-                'prev_day_high': base_price + 1000,
             }
             
             print(f"\n--- 틱 #{i+1} ---")

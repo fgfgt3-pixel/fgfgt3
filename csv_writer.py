@@ -1,6 +1,6 @@
 """
 CSV 저장 모듈
-CLAUDE.md 기반 - 종목별 CSV 파일, 틱마다 34개 지표 저장
+CLAUDE.md 기반 - 종목별 CSV 파일, 틱마다 33개 지표 저장
 """
 
 import os
@@ -17,7 +17,7 @@ class CSVWriter:
     """
     CSV 파일 저장 관리
     - 종목별 개별 CSV 파일
-    - 34개 지표를 한 행으로 저장 (틱 기반)
+    - 33개 지표를 한 행으로 저장 (틱 기반)
     - I/O 에러 처리 및 무결성 보장
     """
     
@@ -37,7 +37,7 @@ class CSVWriter:
         # 디렉토리 생성
         self.ensure_directory()
         
-        # 34개 지표 헤더 정의
+        # 33개 지표 헤더 정의
         self.csv_headers = IndicatorConfig.ALL_INDICATORS
         
         self.logger.info(f"CSVWriter 초기화: {self.base_dir}")
@@ -101,7 +101,7 @@ class CSVWriter:
             return False
     
     def write_indicators(self, stock_code: str, indicators: Dict) -> bool:
-        """34개 지표를 CSV에 저장"""
+        """33개 지표를 CSV에 저장"""
         try:
             self.logger.debug(f"쓰기 시도: {stock_code}, 데이터 키: {list(indicators.keys())[:5]}...")
             # CSV가 초기화되지 않은 경우 초기화

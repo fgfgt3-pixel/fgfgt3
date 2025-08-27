@@ -1,5 +1,5 @@
 """
-데이터 처리 및 34개 지표 계산 엔진
+데이터 처리 및 33개 지표 계산 엔진
 CLAUDE.md 기반 - 틱 기반 업데이트, 종목별 독립 상태 유지
 """
 
@@ -16,7 +16,7 @@ from config import (
 
 class IndicatorCalculator:
     """
-    34개 지표 계산 클래스
+    33개 지표 계산 클래스
     - 틱 기반 실시간 업데이트
     - 종목별 독립 상태 관리
     - rolling window (deque) 사용
@@ -64,13 +64,13 @@ class IndicatorCalculator:
         
     def update_tick_data(self, tick_data: Dict) -> Dict:
         """
-        틱 데이터 업데이트 및 34개 지표 계산
+        틱 데이터 업데이트 및 33개 지표 계산
         
         Args:
             tick_data: 실시간 틱 데이터 dict
             
         Returns:
-            Dict: 계산된 34개 지표
+            Dict: 계산된 33개 지표
         """
         try:
             # time 데이터 타입 안전하게 처리
@@ -107,7 +107,7 @@ class IndicatorCalculator:
             if bid_ask_data:
                 self.bid_ask_buffer.append(bid_ask_data)
             
-            # 34개 지표 계산
+            # 33개 지표 계산
             indicators = self._calculate_all_indicators(tick_data)
             
             # 상태 업데이트 (타입 보장)
@@ -149,7 +149,7 @@ class IndicatorCalculator:
         return bid_ask if any(v > 0 for v in bid_ask.values()) else None
     
     def _calculate_all_indicators(self, tick_data: Dict) -> Dict:
-        """34개 지표 전체 계산"""
+        """33개 지표 전체 계산"""
         # time 데이터 타입 안전하게 처리 (update_tick_data와 동일한 로직)
         time_value = tick_data.get('time', int(time.time() * 1000))
         if isinstance(time_value, str):
@@ -173,7 +173,6 @@ class IndicatorCalculator:
         indicators['stock_code'] = self.stock_code
         indicators['current_price'] = current_price
         indicators['volume'] = current_volume
-        indicators['prev_day_high'] = self.prev_day_high
         
         # ====================================================================
         # 2. 가격 지표 (5개)

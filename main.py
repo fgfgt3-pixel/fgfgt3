@@ -1,6 +1,6 @@
 """
 키움 OpenAPI+ 실시간 데이터 수집 시스템 메인 실행
-CLAUDE.md 기반 - 틱 기반 데이터 취합, 34개 지표 계산, CSV 저장
+CLAUDE.md 기반 - 틱 기반 데이터 취합, 33개 지표 계산, CSV 저장
 """
 
 import sys
@@ -26,7 +26,7 @@ class KiwoomDataCollector:
     기능:
     - 키움 API 연결 및 관리
     - 실시간 틱 데이터 수집
-    - 34개 지표 실시간 계산
+    - 33개 지표 실시간 계산
     - CSV 파일 저장
     - 수급 데이터 주기적 업데이트
     """
@@ -57,7 +57,7 @@ class KiwoomDataCollector:
         self.logger.info("키움 OpenAPI+ 실시간 데이터 수집 시스템")
         self.logger.info("=" * 60)
         self.logger.info(f"대상 종목: {len(self.target_stocks)}개")
-        self.logger.info(f"목적: 틱 기반 데이터 취합, 34개 지표 계산, CSV 저장")
+        self.logger.info(f"목적: 틱 기반 데이터 취합, 33개 지표 계산, CSV 저장")
     
     def setup_logging(self):
         """로깅 설정"""
@@ -179,15 +179,10 @@ class KiwoomDataCollector:
             self.logger.error(f"수급 데이터 업데이트 오류: {e}")
     
     def request_initial_data(self):
-        """초기 데이터 요청 (전일고가 등)"""
+        """초기 데이터 요청"""
         try:
-            for stock_code in self.target_stocks:
-                # 전일고가 요청
-                if self.kiwoom_client.get_prev_day_high(stock_code):
-                    self.logger.debug(f"전일고가 요청: {stock_code}")
-                
-                # API 제한 방지
-                time.sleep(0.2)
+            # 초기 데이터 요청이 필요한 경우 여기에 추가
+            self.logger.info(f"초기 데이터 요청 완료 - 대상 종목: {len(self.target_stocks)}개")
                 
         except Exception as e:
             self.logger.error(f"초기 데이터 요청 오류: {e}")
@@ -224,7 +219,7 @@ class KiwoomDataCollector:
             self.logger.error(f"TR 데이터 처리 오류: {e}")
     
     def on_indicators_calculated(self, stock_code: str, indicators: Dict):
-        """34개 지표 계산 완료 콜백"""
+        """33개 지표 계산 완료 콜백"""
         try:
             # 콜백 호출 로그 (처음 5틱만)
             if self.tick_counts.get(stock_code, 0) <= 5:
@@ -417,7 +412,7 @@ class KiwoomDataCollector:
 def main():
     """메인 실행 함수"""
     print("키움 OpenAPI+ 실시간 데이터 수집 시스템")
-    print("CLAUDE.md 기반 - 틱 기반 데이터 취합, 34개 지표 계산, CSV 저장")
+    print("CLAUDE.md 기반 - 틱 기반 데이터 취합, 33개 지표 계산, CSV 저장")
     print("=" * 60)
     
     # 대상 종목 출력
