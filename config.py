@@ -305,9 +305,9 @@ class IndicatorConfig:
         'prog_net_vol'        # 프로그램 순매수량
     ]
     
-    # 최종 결정: 33개 기본 지표 + 11개 수급 지표 = 총 44개 컬럼 
-    # (36개 지표 중 수급 지표 1개가 11개 컬럼으로 확장)
-    BASIC_33_INDICATORS = EXACT_36_INDICATORS[:-3]  # 호가 잠량 3개 제거로 33개
+    # 최종 결정: 36개 기본 지표 + 11개 수급 지표 = 총 47개 컬럼 
+    # bid3_qty~bid5_qty 누락 문제 해결: 전체 36개 지표 모두 포함
+    BASIC_33_INDICATORS = EXACT_36_INDICATORS  # 전체 36개 지표 포함 (호가 잔량 10개 모두)
     ALL_INDICATORS_WITH_INVESTOR = BASIC_33_INDICATORS + INVESTOR_COLUMNS
     
     # CLAUDE.md 요구사항 준수: 33개 기본 지표 + 11개 수급 지표 = 총 44개 컬럼

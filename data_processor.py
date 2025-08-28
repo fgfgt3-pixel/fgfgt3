@@ -587,9 +587,15 @@ class DataProcessor:
                 # 체결 데이터와 최신 호가 병합
                 merged_data = tick_data.copy()
                 
-                # 최신 호가 데이터 병합
+                # 최신 호가 데이터 병합 - 상세 디버깅
                 if stock_code in self.latest_orderbook:
-                    merged_data.update(self.latest_orderbook[stock_code])
+                    orderbook_data = self.latest_orderbook[stock_code]
+                    self.logger.info(f"🔗 [병합전] {stock_code}: 저장된 ask1={orderbook_data.get('ask1', 'None')}, bid1={orderbook_data.get('bid1', 'None')}")
+                    
+                    merged_data.update(orderbook_data)
+                    
+                    # 병합 결과 확인
+                    self.logger.info(f"🔗 [병합후] {stock_code}: 병합된 ask1={merged_data.get('ask1', 'None')}, bid1={merged_data.get('bid1', 'None')}")
                     self.logger.info(f"🔗 [데이터병합] {stock_code}: 체결+호가 병합 완료")
                 else:
                     # 호가 데이터가 없으면 0으로 초기화
@@ -599,7 +605,8 @@ class DataProcessor:
                                       'bid1_qty','bid2_qty','bid3_qty','bid4_qty','bid5_qty']
                     for field in orderbook_fields:
                         merged_data[field] = 0
-                    self.logger.warning(f"⚠️ [호가없음] {stock_code}: 호가 데이터 없음, 0으로 초기화")
+                    self.logger.warning(f"⚠️ [호가없음] {stock_code}: latest_orderbook에 데이터 없음, 0으로 초기화")
+                    self.logger.warning(f"⚠️ [저장소상태] latest_orderbook 종목목록: {list(self.latest_orderbook.keys())}")
                 
                 # 병합된 데이터로 지표 계산
                 indicators = self.calculators[stock_code].update_tick_data(merged_data)
