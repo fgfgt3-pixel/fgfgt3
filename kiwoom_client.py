@@ -241,47 +241,54 @@ class KiwoomClient:
                 group = stocks[i:i + KiwoomConfig.MAX_STOCKS_PER_SCREEN]
                 screen_groups.append(group)
             
+            # modify.md 방안 2: 완전 별도 화면번호 체계
             success_count = 0
+            SCREEN_BASE_TRADE = "5000"  # 체결용
+            SCREEN_BASE_HOGA = "6000"   # 호가용
+            
             for idx, group in enumerate(screen_groups):
-                screen_no = f"{KiwoomConfig.SCREEN_NO_REALTIME}{idx:02d}"
-                
-                # 전문가 분석: 체결과 호가 FID 분리 등록
                 stock_codes = ";".join(group)
-                basic_fid = OptimizedFID.BASIC_FID  # 체결 데이터만
-                hoga_fid = OptimizedFID.USE_ORDER_BOOK_FID  # 호가 데이터만
                 
-                # 1. 체결 데이터 등록
-                opt_type = "0" if idx == 0 else "1"
-                self.logger.info(f"📊 체결 등록: 화면={screen_no}, 종목={stock_codes}, FID={basic_fid}, opt_type={opt_type}")
-                ret1 = self.ocx.dynamicCall(
-                    "SetRealReg(QString, QString, QString, QString)",
-                    screen_no, stock_codes, basic_fid, opt_type
-                )
-                self.logger.info(f"체결 등록 결과: {ret1}")
-                
-                time.sleep(0.1)  # API 제한 방지
-                
-                # 2. 호가 데이터 추가 등록 (같은 화면에 추가)
-                # 전문가 분석: 같은 화면에 추가 등록 시 "1" 사용 필수
-                hoga_opt_type = "1"  # 추가 등록으로 변경
-                self.logger.info(f"📈 호가 등록: 화면={screen_no}, 종목={stock_codes}, FID={hoga_fid}, opt_type={hoga_opt_type}")
-                ret2 = self.ocx.dynamicCall(
-                    "SetRealReg(QString, QString, QString, QString)",
-                    screen_no, stock_codes, hoga_fid, hoga_opt_type  # "1"로 변경하여 추가 등록
-                )
-                self.logger.info(f"호가 등록 결과: {ret2}")
-                
-                # 안정성을 위한 짧은 대기
-                time.sleep(0.05)
-                
-                # 체결과 호가 모두 성공해야 함
-                if ret1 == 0 and ret2 == 0:
-                    self.screen_numbers[screen_no] = group  # 동일 화면에 체결+호가 모두 등록됨
-                    self.registered_stocks.update(group)
-                    success_count += len(group)
-                    self.logger.info(f"✅ 실시간 등록 성공: 화면 {screen_no}(체결+호가), 종목 {len(group)}개")
-                else:
-                    self.logger.error(f"❌ 실시간 등록 실패: 체결={ret1}, 호가={ret2}")
+                # 종목별 개별 등록 (modify.md 권장)
+                for stock_idx, stock_code in enumerate(group):
+                    # 1. 기존 등록 제거 (중요!)
+                    self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", stock_code)
+                    time.sleep(0.05)
+                    
+                    # 2. 체결 데이터 등록 (완전 별도 화면)
+                    screen_trade = f"{SCREEN_BASE_TRADE}{idx:02d}{stock_idx:01d}"
+                    basic_fid = OptimizedFID.BASIC_FID
+                    self.logger.info(f"📊 [체결등록] 화면={screen_trade}, 종목={stock_code}, FID={basic_fid}")
+                    ret1 = self.ocx.dynamicCall(
+                        "SetRealReg(QString, QString, QString, QString)",
+                        screen_trade, stock_code, basic_fid, "0"  # 신규 등록
+                    )
+                    
+                    time.sleep(0.1)  # API 제한 방지
+                    
+                    # 3. 호가 데이터 별도 화면 등록 (중요!)
+                    screen_hoga = f"{SCREEN_BASE_HOGA}{idx:02d}{stock_idx:01d}"
+                    hoga_fid = OptimizedFID.USE_ORDER_BOOK_FID
+                    self.logger.info(f"📈 [호가등록] 화면={screen_hoga}, 종목={stock_code}, FID={hoga_fid}")
+                    ret2 = self.ocx.dynamicCall(
+                        "SetRealReg(QString, QString, QString, QString)",
+                        screen_hoga, stock_code, hoga_fid, "0"  # 신규 등록 (별도 화면)
+                    )
+                    
+                    time.sleep(0.1)  # 안정성 대기
+                    
+                    # 등록 결과 확인
+                    if ret1 == 0 and ret2 == 0:
+                        self.screen_numbers[screen_trade] = [stock_code]  # 체결 화면
+                        self.screen_numbers[screen_hoga] = [stock_code]   # 호가 화면
+                        self.registered_stocks.add(stock_code)
+                        success_count += 1
+                        self.logger.info(f"✅ [등록성공] {stock_code}: 체결({screen_trade}) + 호가({screen_hoga})")
+                    else:
+                        self.logger.error(f"❌ [등록실패] {stock_code}: 체결={ret1}, 호가={ret2}")
+                        
+                    # 과도한 요청 방지
+                    time.sleep(0.2)
             
             self.logger.info(f"전체 실시간 등록: {success_count}/{len(stocks)} 성공")
             return success_count == len(stocks)
@@ -325,15 +332,22 @@ class KiwoomClient:
                     self.logger.info(f"[체결] {stock_code}: {current_price:,}원")
                         
             elif real_type in ["주식호가", "주식호가잔량"]:
-                # 전문가 진단: 실제 수신된 real_type 확인
+                # modify.md 방안 3: 디버깅 강화 - raw 데이터 전체 덤프
                 self.logger.info(f"🎯 [호가이벤트수신] {stock_code}: real_type='{real_type}'")
+                self.logger.debug(f"📊 RAW 호가 데이터 전체: {str(real_data)[:200]}...")
                 
                 for field, fid in RealDataFID.STOCK_HOGA.items():
                     try:
                         raw_value = self.ocx.dynamicCall("GetCommRealData(QString, int)", stock_code, fid)
                         
-                        # 전문가 분석: 모든 FID raw 값 로깅 강화
-                        self.logger.info(f"🔍 [FID검증] FID {fid} ({field}): raw='{raw_value}'")
+                        # modify.md 방안 3: 다양한 방식으로 FID 테스트
+                        raw_value_int = self.ocx.dynamicCall("GetCommRealData(QString, int)", stock_code, fid)
+                        raw_value_str = self.ocx.dynamicCall("GetCommRealData(QString, QString)", stock_code, str(fid))
+                        
+                        self.logger.info(f"🔍 [FID검증] FID {fid} ({field}): int='{raw_value_int}', str='{raw_value_str}'")
+                        
+                        # 더 안전한 값 선택 (비어있지 않은 값 우선)
+                        raw_value = raw_value_int if raw_value_int.strip() else raw_value_str
                         
                         # 전문가 권장: 부호 제거 및 안전 파싱
                         cleaned_value = raw_value.strip().replace('+', '').replace('-', '') if raw_value else ''

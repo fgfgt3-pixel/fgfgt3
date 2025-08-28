@@ -538,37 +538,91 @@ class DataProcessor:
         for stock_code in self.target_stocks:
             self.calculators[stock_code] = IndicatorCalculator(stock_code, kiwoom_client)
         
+        # modify.md 분석: 종목별 최신 호가 저장소 (데이터 흐름 단절 해결)
+        self.latest_orderbook: Dict[str, Dict] = {}
+        
         # 콜백 함수
         self.indicator_callback: Optional[callable] = None
         
-        self.logger.info(f"DataProcessor 초기화: {len(self.calculators)}개 종목")
+        self.logger.info(f"DataProcessor 초기화: {len(self.calculators)}개 종목 + 호가저장소")
     
     def process_realdata(self, stock_code: str, real_type: str, tick_data: Dict) -> Optional[Dict]:
-        """실시간 데이터 처리"""
+        """modify.md 분석 반영: 실시간 데이터 처리 + 호가 데이터 병합"""
         if stock_code not in self.calculators:
             self.logger.warning(f"등록되지 않은 종목: {stock_code}")
             return None
         
         try:
-            # 지표 계산
-            indicators = self.calculators[stock_code].update_tick_data(tick_data)
-            
-            # 디버깅 로그 (처음 5틱만)
-            if len(self.calculators[stock_code].price_buffer) <= 5:
-                self.logger.info(f"[DataProcessor] {stock_code} - 지표개수: {len(indicators) if indicators else 0}")
-            
-            if indicators and self.indicator_callback:
-                self.indicator_callback(stock_code, indicators)
-            elif not indicators:
+            # modify.md 방안 1: 데이터 병합 로직 추가
+            if real_type in ["주식호가", "주식호가잔량"]:
+                # 호가 데이터를 메모리에 저장 (CSV 저장 안함)
+                self.latest_orderbook[stock_code] = {
+                    'ask1': tick_data.get('ask1', 0),
+                    'ask2': tick_data.get('ask2', 0), 
+                    'ask3': tick_data.get('ask3', 0),
+                    'ask4': tick_data.get('ask4', 0),
+                    'ask5': tick_data.get('ask5', 0),
+                    'bid1': tick_data.get('bid1', 0),
+                    'bid2': tick_data.get('bid2', 0),
+                    'bid3': tick_data.get('bid3', 0),
+                    'bid4': tick_data.get('bid4', 0),
+                    'bid5': tick_data.get('bid5', 0),
+                    'ask1_qty': tick_data.get('ask1_qty', 0),
+                    'ask2_qty': tick_data.get('ask2_qty', 0),
+                    'ask3_qty': tick_data.get('ask3_qty', 0),
+                    'ask4_qty': tick_data.get('ask4_qty', 0),
+                    'ask5_qty': tick_data.get('ask5_qty', 0),
+                    'bid1_qty': tick_data.get('bid1_qty', 0),
+                    'bid2_qty': tick_data.get('bid2_qty', 0),
+                    'bid3_qty': tick_data.get('bid3_qty', 0),
+                    'bid4_qty': tick_data.get('bid4_qty', 0),
+                    'bid5_qty': tick_data.get('bid5_qty', 0),
+                    'timestamp': time.time()
+                }
+                
+                self.logger.info(f"🏦 [호가저장] {stock_code}: ask1={tick_data.get('ask1', 0)}, bid1={tick_data.get('bid1', 0)}")
+                return None  # 호가 이벤트는 CSV 저장하지 않음
+                
+            elif real_type in ["주식체결"]:
+                # 체결 데이터와 최신 호가 병합
+                merged_data = tick_data.copy()
+                
+                # 최신 호가 데이터 병합
+                if stock_code in self.latest_orderbook:
+                    merged_data.update(self.latest_orderbook[stock_code])
+                    self.logger.info(f"🔗 [데이터병합] {stock_code}: 체결+호가 병합 완료")
+                else:
+                    # 호가 데이터가 없으면 0으로 초기화
+                    orderbook_fields = ['ask1','ask2','ask3','ask4','ask5',
+                                      'bid1','bid2','bid3','bid4','bid5',
+                                      'ask1_qty','ask2_qty','ask3_qty','ask4_qty','ask5_qty',
+                                      'bid1_qty','bid2_qty','bid3_qty','bid4_qty','bid5_qty']
+                    for field in orderbook_fields:
+                        merged_data[field] = 0
+                    self.logger.warning(f"⚠️ [호가없음] {stock_code}: 호가 데이터 없음, 0으로 초기화")
+                
+                # 병합된 데이터로 지표 계산
+                indicators = self.calculators[stock_code].update_tick_data(merged_data)
+                
+                # 디버깅 로그 (처음 5틱만)
                 if len(self.calculators[stock_code].price_buffer) <= 5:
-                    self.logger.warning(f"[DataProcessor] {stock_code} - 빈 지표 반환됨")
-            elif not self.indicator_callback:
-                self.logger.warning(f"[DataProcessor] 콜백이 None입니다!")
-            
-            return indicators
+                    self.logger.info(f"📊 [지표계산] {stock_code}: 지표개수={len(indicators) if indicators else 0}")
+                
+                if indicators and self.indicator_callback:
+                    self.indicator_callback(stock_code, indicators)
+                elif not indicators:
+                    if len(self.calculators[stock_code].price_buffer) <= 5:
+                        self.logger.warning(f"❌ [지표없음] {stock_code}: 빈 지표 반환됨")
+                elif not self.indicator_callback:
+                    self.logger.warning(f"❌ [콜백없음] 콜백이 None입니다!")
+                
+                return indicators
+            else:
+                self.logger.warning(f"🔍 [미지원타입] {real_type}: 처리하지 않음")
+                return None
             
         except Exception as e:
-            self.logger.error(f"실시간 데이터 처리 오류 ({stock_code}): {e}")
+            self.logger.error(f"❌ 실시간 데이터 처리 오류 ({stock_code}): {e}")
             import traceback
             self.logger.error(f"상세 오류: {traceback.format_exc()}")
             return None
