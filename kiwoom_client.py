@@ -245,30 +245,43 @@ class KiwoomClient:
             for idx, group in enumerate(screen_groups):
                 screen_no = f"{KiwoomConfig.SCREEN_NO_REALTIME}{idx:02d}"
                 
-                # CLAUDE.md 최적화된 FID 사용 - 단일 등록
+                # 전문가 분석: 체결과 호가 FID 분리 등록
                 stock_codes = ";".join(group)
-                fid_list = OptimizedFID.get_fid_list()
+                basic_fid = OptimizedFID.BASIC_FID  # 체결 데이터만
+                hoga_fid = OptimizedFID.USE_ORDER_BOOK_FID  # 호가 데이터만
                 
-                # 첫 종목만 "0" (신규 등록), 나머지는 "1" (추가 등록)
+                # 1. 체결 데이터 등록
                 opt_type = "0" if idx == 0 else "1"
-                
-                self.logger.info(f"실시간 등록 (최적화): 화면={screen_no}, 종목={stock_codes}, FID={fid_list}, opt_type={opt_type}")
+                self.logger.info(f"📊 체결 등록: 화면={screen_no}, 종목={stock_codes}, FID={basic_fid}, opt_type={opt_type}")
                 ret1 = self.ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    screen_no, stock_codes, fid_list, opt_type
+                    screen_no, stock_codes, basic_fid, opt_type
                 )
-                self.logger.info(f"실시간 등록 결과: {ret1}")
+                self.logger.info(f"체결 등록 결과: {ret1}")
+                
+                time.sleep(0.1)  # API 제한 방지
+                
+                # 2. 호가 데이터 별도 등록 (별도 화면)
+                hoga_screen = f"{KiwoomConfig.SCREEN_NO_REALTIME}{idx:02d}H"  # H 접미사로 구분
+                self.logger.info(f"📈 호가 등록: 화면={hoga_screen}, 종목={stock_codes}, FID={hoga_fid}, opt_type=0")
+                ret2 = self.ocx.dynamicCall(
+                    "SetRealReg(QString, QString, QString, QString)",
+                    hoga_screen, stock_codes, hoga_fid, "0"  # 호가는 항상 신규 등록
+                )
+                self.logger.info(f"호가 등록 결과: {ret2}")
                 
                 # 안정성을 위한 짧은 대기
                 time.sleep(0.05)
                 
-                if ret1 == 0:
+                # 체결과 호가 모두 성공해야 함
+                if ret1 == 0 and ret2 == 0:
                     self.screen_numbers[screen_no] = group
+                    self.screen_numbers[hoga_screen] = group  # 호가 화면도 등록
                     self.registered_stocks.update(group)
                     success_count += len(group)
-                    self.logger.info(f"실시간 등록 성공: 화면 {screen_no}, 종목 {len(group)}개")
+                    self.logger.info(f"✅ 실시간 등록 성공: 화면 {screen_no}(체결) + {hoga_screen}(호가), 종목 {len(group)}개")
                 else:
-                    self.logger.error(f"실시간 등록 실패: 화면 {screen_no}, ret={ret1}")
+                    self.logger.error(f"❌ 실시간 등록 실패: 체결={ret1}, 호가={ret2}")
             
             self.logger.info(f"전체 실시간 등록: {success_count}/{len(stocks)} 성공")
             return success_count == len(stocks)
@@ -280,11 +293,13 @@ class KiwoomClient:
     def on_receive_real_data(self, stock_code: str, real_type: str, real_data: str):
         """실시간 데이터 수신 처리"""
         try:
-            # 실시간 데이터 수신 확인 로그 (중요!)
-            self.logger.info(f"[실시간] {stock_code} {real_type} 데이터 수신")
+            # 전문가 진단: 모든 real_type 상세 로깅
+            self.logger.info(f"📡 [실시간수신] {stock_code}: real_type='{real_type}' (raw_data_len={len(real_data)})")
             
-            # 실시간 타입별 데이터 처리 (모든 타입 로그)
-            self.logger.info(f"[실시간타입] {stock_code}: {real_type}")
+            # 알려진 타입이 아닌 경우 경고
+            known_types = ["주식체결", "주식호가", "주식호가잔량", "주식시세"]
+            if real_type not in known_types:
+                self.logger.warning(f"⚠️  [미지타입] {stock_code}: '{real_type}' - 새로운 이벤트 타입!")
             
             # 현재 시간을 HHMMSS.mmm 형식으로 생성 (시:분:초.밀리초)
             from datetime import datetime
@@ -310,8 +325,8 @@ class KiwoomClient:
                     self.logger.info(f"[체결] {stock_code}: {current_price:,}원")
                         
             elif real_type in ["주식호가", "주식호가잔량"]:
-                # 호가 데이터 추출 (키움 API에서 실제 타입명이 다를 수 있음)
-                self.logger.info(f"[호가데이터시작] {stock_code}: {real_type}")
+                # 전문가 진단: 실제 수신된 real_type 확인
+                self.logger.info(f"🎯 [호가이벤트수신] {stock_code}: real_type='{real_type}'")
                 
                 for field, fid in RealDataFID.STOCK_HOGA.items():
                     try:
@@ -319,17 +334,21 @@ class KiwoomClient:
                         parsed_value = self.parse_real_value(value, field)
                         data[field] = parsed_value
                         
-                        # 주요 호가 데이터 상세 로그
-                        if field in ['ask1_price', 'bid1_price', 'ask1_qty', 'bid1_qty']:
-                            self.logger.info(f"[호가파싱] {field}(FID={fid}): raw='{value}' -> parsed={parsed_value}")
+                        # 전문가 진단: 모든 호가 데이터 raw 값 로깅
+                        if field in ['ask1', 'bid1', 'ask1_qty', 'bid1_qty'] or parsed_value != 0:
+                            self.logger.info(f"🔍 [FID{fid}] {field}: raw='{value}' → parsed={parsed_value}")
+                        
+                        # 빈 값이 아닌 실제 데이터 발견시 강조
+                        if value.strip():
+                            self.logger.info(f"💡 [데이터발견] FID {fid} ({field}): '{value.strip()}'")
                             
                     except Exception as ex:
                         self.logger.error(f"호가 FID {fid}({field}) 추출 오류: {ex}")
                         data[field] = 0
                 
-                # spread 계산용 ask1, bid1 저장
-                ask1_price = data.get('ask1_price', 0)
-                bid1_price = data.get('bid1_price', 0)
+                # 키 매핑 수정: ask1_price → ask1
+                ask1_price = data.get('ask1', 0)
+                bid1_price = data.get('bid1', 0)
                 
                 if ask1_price > 0:
                     self.ask1[stock_code] = ask1_price
@@ -506,30 +525,37 @@ class KiwoomClient:
         try:
             investor_data = {}
             
-            # 투자주체별 순매수 데이터 추출
+            # OPT10059 실제 필드명 (전문가 분석 반영)
             fields = {
-                'indiv_net': '개인',
-                'foreign_net': '외국인',
-                'inst_net': '기관',
-                'pension_net': '연기금',
+                'indiv_net': '개인투자자',
+                'foreign_net': '외국인투자자', 
+                'inst_net': '기관계',
+                'pension_net': '연기금등',
                 'trust_net': '투신',
                 'insurance_net': '보험', 
                 'private_fund_net': '사모펀드',
                 'bank_net': '은행',
                 'state_net': '국가',
                 'other_net': '기타법인',
-                'prog_net': '프로그램'
+                'prog_net': '내외국인'  # '프로그램'은 OPT10059에 없음
             }
             
             for key, field_name in fields.items():
                 try:
-                    value = self.ocx.dynamicCall(
+                    raw_value = self.ocx.dynamicCall(
                         "GetCommData(QString, QString, int, QString)",
                         tr_code, rq_name, 0, field_name
-                    ).strip()
-                    investor_data[key] = int(value) if value else 0
-                except:
+                    )
+                    cleaned_value = raw_value.strip()
+                    parsed_value = int(cleaned_value) if cleaned_value else 0
+                    investor_data[key] = parsed_value
+                    
+                    # 진단용 상세 로깅
+                    self.logger.info(f"[수급파싱] {key}({field_name}): raw='{raw_value}' → parsed={parsed_value}")
+                    
+                except Exception as e:
                     investor_data[key] = 0
+                    self.logger.error(f"[수급파싱오류] {key}({field_name}): {e}")
             
             # 총 순매수량 계산
             investor_data['total_net'] = sum(investor_data.values())
