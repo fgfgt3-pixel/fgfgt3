@@ -1,6 +1,7 @@
 """
 키움 OpenAPI+ 실시간 데이터 수집 시스템 설정 관리
-CLAUDE.md 기반 - 틱 기반 데이터 취합, 33개 지표 계산, CSV 저장
+CLAUDE.md 기반 - 틱 기반 데이터 취합, 36개 지표 계산, CSV 저장
+수정된 사항: QTimer 방식, FID 최적화, TR 제한 단순화
 """
 
 import os
@@ -11,7 +12,7 @@ from typing import List, Dict
 # ============================================================================
 TARGET_STOCKS: List[str] = [
     "005930",  # 삼성전자 (초기 1개로 시작)
-    "000660",  # SK하이닉스 (modify.md 개선: 다중 종목 지원 테스트)
+    # "000660",  # SK하이닉스 (다중 종목 테스트용)
     # "035720",  # 카카오
     # "207940",  # 삼성바이오로직스
     # "005380",  # 현대차
@@ -49,9 +50,8 @@ class KiwoomConfig:
     LOGIN_PW = os.getenv("KIWOOM_PW", "")  # 자동로그인 사용시 불필요
     LOGIN_CERT = os.getenv("KIWOOM_CERT", "")  # 공인인증서
     
-    # API 제한 설정
-    TR_PER_SECOND = 1      # 초당 TR 요청 제한
-    TR_PER_MINUTE = 60     # 분당 TR 요청 제한
+    # TR 제한 설정 (단순화된 사항)
+    TR_INTERVAL_SECONDS = 60  # 동일 TR 60초 제한
     MAX_STOCKS_PER_SCREEN = 100  # 화면당 최대 종목 수
     
     # 재연결 설정
@@ -69,6 +69,9 @@ class DataConfig:
     # CSV 저장 경로
     CSV_DIR = "pure_websocket_data"
     
+    # CSV 배치 설정 (선택 가능)
+    CSV_BATCH_SIZE = 10  # 절충안 (1=즉시저장, 100=배치저장)
+    
     # 로그 설정
     LOG_DIR = "logs"
     LOG_LEVEL = "INFO"  # INFO, WARNING, ERROR
@@ -80,6 +83,30 @@ class DataConfig:
     
     # 수급 지표 업데이트 주기 (초)
     INVESTOR_UPDATE_INTERVAL = 60  # 1분마다 OPT10059 TR 호출
+    
+# ============================================================================
+# FID 설정 (수정된 사항 - 최적화된 FID 리스트)
+# ============================================================================
+class OptimizedFID:
+    """최적화된 FID 설정"""
+    
+    # 기본 FID (필수)
+    BASIC_FID = "10;11;12;13;14;15;20"  # 현재가, 대비, 등량율, 거래량, 시간
+    
+    # 호가 FID 선택 옵션 (테스트 후 선택)
+    # 체결 중심: FID 27(최우선매도호가), 28(최우선매수호가)
+    ORDER_BOOK_FID_TRADE_FOCUSED = "27;28"  # 체결 중심 (기본값)
+    
+    # 호가 잔량 중심: FID 41~45(매도호가1~5), 51~55(매수호가1~5), 61~65(매도잔량), 71~75(매수잔량) 
+    ORDER_BOOK_FID_DEPTH_FOCUSED = "41;42;43;44;45;51;52;53;54;55;61;62;63;64;65;71;72;73;74;75"  # 호가+잔량 5단계
+    
+    # 기본값: 호가 중심으로 변경 (데이터 누락 해결)
+    USE_ORDER_BOOK_FID = ORDER_BOOK_FID_DEPTH_FOCUSED
+    
+    # 전체 FID 리스트 (연결)
+    @classmethod
+    def get_fid_list(cls):
+        return cls.BASIC_FID + ";" + cls.USE_ORDER_BOOK_FID
 
 # ============================================================================
 # 실시간 데이터 FID 정의 (키움 OpenAPI FID 코드)
@@ -102,25 +129,19 @@ class RealDataFID:
         'prev_close': 19,       # 전일종가
     }
     
-    # 주식호가 (호가 데이터)
+    # 주식호가 (호가 데이터) - 키움 API 정확한 FID
     STOCK_HOGA = {
-        # 매도호가 (ask)
-        'ask1_price': 27,       'ask1_qty': 28,
-        'ask2_price': 29,       'ask2_qty': 30, 
-        'ask3_price': 31,       'ask3_qty': 32,
-        'ask4_price': 33,       'ask4_qty': 34,
-        'ask5_price': 35,       'ask5_qty': 36,
+        # 매도호가 (ask) - FID 41~45
+        'ask1': 41,       'ask2': 42,       'ask3': 43,       'ask4': 44,       'ask5': 45,
         
-        # 매수호가 (bid)
-        'bid1_price': 37,       'bid1_qty': 38,
-        'bid2_price': 39,       'bid2_qty': 40,
-        'bid3_price': 41,       'bid3_qty': 42,
-        'bid4_price': 43,       'bid4_qty': 44,
-        'bid5_price': 45,       'bid5_qty': 46,
+        # 매수호가 (bid) - FID 51~55  
+        'bid1': 51,       'bid2': 52,       'bid3': 53,       'bid4': 54,       'bid5': 55,
         
-        # 호가 총량
-        'total_ask_qty': 121,   # 매도호가총잔량
-        'total_bid_qty': 122,   # 매수호가총잔량
+        # 매도잔량 (ask_qty) - FID 61~65
+        'ask1_qty': 61,   'ask2_qty': 62,   'ask3_qty': 63,   'ask4_qty': 64,   'ask5_qty': 65,
+        
+        # 매수잔량 (bid_qty) - FID 71~75
+        'bid1_qty': 71,   'bid2_qty': 72,   'bid3_qty': 73,   'bid4_qty': 74,   'bid5_qty': 75
     }
     
     # 실시간 등록용 FID 문자열

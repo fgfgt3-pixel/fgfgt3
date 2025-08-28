@@ -32,7 +32,7 @@
 
 ## 3. 기술 사양
 
-### 3.1 config.py (설정 관리) - 수정된 사항
+### 3.1 config.py (설정 관리)
 ```python
 # 종목 코드 중앙 관리
 TARGET_STOCKS = ['005930']  # 초기 1개, 최대 20개까지 점진 증가
@@ -45,17 +45,11 @@ ACCOUNT_NO = "계좌번호"
 # 데이터 설정
 MAX_TICK_BUFFER = 1000
 CSV_DIR = "pure_websocket_data"
+BATCH_SIZE = 100  # CSV 배치 저장 크기
 
-# CSV 배치 설정 (선택 가능)
-CSV_BATCH_SIZE = 10  # 절충안 (1=즉시저장, 100=배치저장)
-
-# FID 설정 (테스트 후 선택)
-# 체결 중심: FID 27(최우선매도호가), 28(최우선매수호가)
-# 호가 중심: FID 41(매도호가1), 51(매수호가1)
-USE_ORDER_BOOK_FID = "27;28"  # 기본값: 체결 중심
-
-# TR 제한 (단순화)
-TR_INTERVAL_SECONDS = 60  # 동일 TR 60초 제한
+# TR 제한 설정
+TR_LIMIT_PER_SECOND = 4  # 안전하게 4회
+TR_LIMIT_PER_MINUTE = 90  # 안전하게 90회
 ```
 
 ### 3.2 Open API 연결 및 실시간 등록
@@ -63,17 +57,25 @@ TR_INTERVAL_SECONDS = 60  # 동일 TR 60초 제한
 #### 실시간 데이터 등록 (SetRealReg)
 ```python
 def register_real_data(self, stock_codes):
-    # 최적화된 FID 리스트 (필수 데이터만)
-    # 키움 OpenAPI 공식 가이드:
-    # - FID 10: 현재가, 13: 거래량
-    # - FID 27: 최우선매도호가, 28: 최우선매수호가 (체결 중심)
-    # - FID 41: 매도호가1, 51: 매수호가1 (호가 잔량 중심)
-    fid_list = "10;11;12;13;14;15;20;27;28"  # 체결 중심 (권장)
-    # 또는 fid_list = "10;11;12;13;14;15;20;41;51" # 호가 잔량 중심
+    # 완전한 FID 리스트 (체결, 호가, 잔량 모두 포함)
+    fid_list = (
+        # 체결 데이터
+        "10;11;12;13;14;15;16;17;18;20;25;26;"
+        # 매도호가 (41~50)
+        "41;42;43;44;45;46;47;48;49;50;"
+        # 매수호가 (51~60)
+        "51;52;53;54;55;56;57;58;59;60;"
+        # 매도잔량 (61~70)
+        "61;62;63;64;65;66;67;68;69;70;"
+        # 매수잔량 (71~80)
+        "71;72;73;74;75;76;77;78;79;80;"
+        # 추가 필요 FID
+        "27;28;29;30;31;32;33;34;35"
+    )
     
     for idx, code in enumerate(stock_codes):
         screen_no = f"{1000 + idx}"  # 종목별 화면번호 분리
-        opt_type = "0" if idx == 0 else "1"  # 첫 종목만 신규, 나머지는 추가
+        opt_type = "0"  # 신규 등록 (중요: "1"이 아닌 "0")
         
         self.SetRealReg(screen_no, code, fid_list, opt_type)
         time.sleep(0.05)  # 안정성
@@ -81,32 +83,22 @@ def register_real_data(self, stock_codes):
 
 #### 연결 상태 모니터링
 ```python
-from PyQt5.QtCore import QTimer
-
 class ConnectionMonitor:
-    def __init__(self, kiwoom):
-        self.kiwoom = kiwoom
-        self.monitor_timer = QTimer()
-        self.monitor_timer.timeout.connect(self.check_connection)
-        
-    def start_monitoring(self):
-        self.monitor_timer.start(10000)  # 10초마다 체크
-        
-    def check_connection(self):
-        state = self.kiwoom.GetConnectState()
-        
-        if state == 0:  # 연결 끊김
-            print("연결 끊김 감지! 재연결 시도...")
-            self.kiwoom.CommTerminate()
+    async def monitor_connection(self, kiwoom):
+        while True:
+            state = kiwoom.GetConnectState()
             
-            # 재로그인
-            if self.kiwoom.CommConnect() == 0:
-                # 실시간 재등록
-                self.re_register_all()
+            if state == 0:  # 연결 끊김
+                print("연결 끊김 감지! 재연결 시도...")
+                kiwoom.CommTerminate()
+                await asyncio.sleep(1)
                 
-    def stop_monitoring(self):
-        if self.monitor_timer:
-            self.monitor_timer.stop()
+                # 재로그인
+                if kiwoom.CommConnect() == 0:
+                    # 실시간 재등록
+                    await self.re_register_all()
+                    
+            await asyncio.sleep(10)  # 10초마다 체크
 ```
 
 ### 3.3 이벤트 핸들러
@@ -239,83 +231,89 @@ class InvestorNetManager:
         self.tr_schedule.put((next_time, stock_code, next_round))
 ```
 
-### 4.2 TR 요청 제한 관리 (단순화)
+### 4.2 TR 요청 제한 관리
 ```python
-# TR 요청 제한: 동일 TR코드 + 동일 조건 = 60초 1회 (불변사항)
-from PyQt5.QtCore import QTimer
-import time
-import logging
+# TR 요청은 3가지 레벨의 제한을 모두 준수해야 함
+# 1. 초당 제한: 모든 TR 합계 4회 (안전 마진, 실제 제한 5회)
+# 2. 분당 제한: 모든 TR 합계 90회 (안전 마진, 실제 제한 100-200회)  
+# 3. 동일 TR 제한: 같은 TR코드 + 같은 조건 = 60초 1회  (불변사항)
 
-class SimpleTRManager:
-    """단순화된 TR 요청 관리"""
+class SafeTRScheduler:
+    """모든 TR 요청 제한 통합 관리"""
     
     def __init__(self, kiwoom_client):
         self.kiwoom = kiwoom_client
-        self.last_opt10059 = {}  # 종목별 마지막 요청 시간만
-        self.timers = {}  # 종목별 QTimer 관리
         
-    def can_request(self, stock_code):
-        """60초 제한 체크"""
-        if stock_code in self.last_opt10059:
-            if time.time() - self.last_opt10059[stock_code] < 60:
-                return False
-        return True
-    
-    def request_opt10059(self, stock_code):
-        """OPT10059 요청 (성공시에만 시간 기록)"""
-        if not self.can_request(stock_code):
-            return False
+        # 전체 TR 트래픽 관리
+        self.request_history = []
         
-        try:
-            self.kiwoom.SetInputValue("종목코드", stock_code)
-            self.kiwoom.SetInputValue("기준일자", datetime.now().strftime("%Y%m%d"))
-            self.kiwoom.SetInputValue("수정주가구분", "1")
-            
-            req_name = f"opt10059_{stock_code}_{int(time.time())}"
-            self.kiwoom.CommRqData(req_name, "opt10059", 0, "5959")
-            
-            # 성공 후에만 시간 기록
-            self.last_opt10059[stock_code] = time.time()
-            return True
-        except Exception as e:
-            logging.error(f"TR 실패: {e}")
-            return False
+        # 동일 TR별 마지막 요청 시간
+        # 키: (tr_code, 종목코드, 조건) 튜플
+        self.last_request_per_tr = {}
     
-    def request_with_retry(self, stock_code):
-        """에러 시에도 Timer 체인 유지"""
-        try:
-            if self.can_request(stock_code):
-                self.request_opt10059(stock_code)
-        except Exception as e:
-            logging.error(f"TR 실패 {stock_code}: {e}")
-        finally:
-            # 에러 여부 관계없이 다음 타이머 예약
-            QTimer.singleShot(60000, 
-                lambda sc=stock_code: self.request_with_retry(sc))
+    async def request_tr(self, tr_code, stock_code, input_dict, round_num=0):
+        """범용 TR 요청 (모든 제한 체크)"""
+        
+        # 1. 동일 TR 60초 제한 체크
+        tr_key = (tr_code, stock_code, str(input_dict))
+        current_time = time.time()
+        
+        if tr_key in self.last_request_per_tr:
+            elapsed = current_time - self.last_request_per_tr[tr_key]
+            if elapsed < 60:
+                wait_time = 60 - elapsed
+                print(f"{tr_code} {stock_code}: {wait_time:.1f}초 후 재요청 가능")
+                await asyncio.sleep(wait_time)
+        
+        # 2. 초당/분당 제한 체크
+        await self._check_traffic_limits()
+        
+        # 3. TR 요청 실행
+        for key, value in input_dict.items():
+            self.kiwoom.SetInputValue(key, value)
+        
+        req_name = f"{tr_code}_{stock_code}_{round_num}"
+        self.kiwoom.CommRqData(req_name, tr_code, 0, self._get_screen_no(tr_code))
+        
+        # 4. 요청 기록
+        self.last_request_per_tr[tr_key] = current_time
+        self.request_history.append(current_time)
+        
+    async def request_opt10059(self, stock_code, round_num):
+        """OPT10059 특화 메서드 (하위호환성)"""
+        input_dict = {
+            "종목코드": stock_code,
+            "기준일자": datetime.now().strftime("%Y%m%d"),
+            "수정주가구분": "1"
+        }
+        await self.request_tr("OPT10059", stock_code, input_dict, round_num)
     
-    def schedule_next_request(self, stock_code):
-        """종목별 60초 타이머 시작"""
-        if stock_code in self.timers:
-            self.timers[stock_code].stop()
+    async def _check_traffic_limits(self):
+        """초당/분당 트래픽 제한 체크"""
+        current_time = time.time()
+        
+        # 오래된 기록 정리
+        self.request_history = [t for t in self.request_history 
+                               if current_time - t < 60]
+        
+        # 초당 제한 (5회 -> 안전하게 4회)
+        recent_1s = [t for t in self.request_history 
+                     if current_time - t < 1]
+        if len(recent_1s) >= 4:
+            wait_time = 1 - (current_time - recent_1s[0])
+            await asyncio.sleep(wait_time)
             
-        timer = QTimer()
-        timer.timeout.connect(
-            lambda sc=stock_code: self.request_with_retry(sc))
-        timer.setSingleShot(True)
-        timer.start(60000)  # 60초
-        self.timers[stock_code] = timer
+        # 분당 제한 (100회 -> 안전하게 90회)
+        if len(self.request_history) >= 90:
+            wait_time = 60 - (current_time - self.request_history[0])
+            print(f"분당 제한 근접. {wait_time:.1f}초 대기")
+            await asyncio.sleep(wait_time)
     
-    def initialize_requests(self, stock_codes):
-        """프로그램 시작 시 즉시 TR 요청"""
-        for i, stock_code in enumerate(stock_codes):
-            # 동시 요청 방지를 위한 지연
-            QTimer.singleShot(i * 200, 
-                lambda sc=stock_code: self.request_opt10059(sc))
-            
-    def cleanup(self):
-        """종료 시 타이머 정리"""
-        for timer in self.timers.values():
-            timer.stop()
+    def _get_screen_no(self, tr_code):
+        """TR별 화면번호 반환"""
+        if tr_code == "OPT10059":
+            return "5959"
+        return "5000"  # 기본 TR 화면번호
 
 
 ## 5. 데이터 처리 및 저장
@@ -484,110 +482,128 @@ class DebugChecker:
         print("✓ 종목별 독립 타이머")
 ```
 
-## 8. 메인 실행 로직 (단순화)
+## 8. 메인 실행 로직
 ```python
-from PyQt5.QtCore import QTimer
-
 class RealtimeCollector:
-    """실시간 수집 메인 클래스 (QTimer 방식)"""
+    """실시간 수집 메인 클래스"""
     
     def __init__(self, config):
         self.stock_codes = config.TARGET_STOCKS
         self.investor_manager = InvestorNetManager(self.stock_codes)
-        self.tr_manager = SimpleTRManager(kiwoom_client)
+        self.tr_scheduler = SafeTRScheduler(kiwoom_client)
         self.tick_processor = TickProcessor(self.investor_manager)
         self.csv_writer = CSVWriter()
-        self.connection_monitor = ConnectionMonitor(kiwoom_client)
+        self.error_recovery = ErrorRecovery()
         
-    def run(self):
-        """메인 실행 (동기 방식)"""
-        # 연결 상태 모니터링 시작
-        self.connection_monitor.start_monitoring()
+    async def run(self):
+        """메인 실행"""
+        # 초기 데이터 로드
+        for stock_code in self.stock_codes:
+            await self.initialize_stock_data(stock_code)
         
-        # 실시간 데이터 등록
+        # 실시간 등록
         self.register_real_data(self.stock_codes)
         
-        # 초기 수급 데이터 즉시 TR 요청
-        self.tr_manager.initialize_requests(self.stock_codes)
+        # 비동기 태스크 실행
+        tasks = [
+            self.tr_loop(),      # TR 요청 처리
+            self.tick_loop(),    # 틱 데이터 처리
+            self.monitor_loop(), # 연결 상태 모니터링
+        ]
+        await asyncio.gather(*tasks)
         
-        # 종목별 60초 타이머 시작
-        for stock_code in self.stock_codes:
-            self.tr_manager.schedule_next_request(stock_code)
-            
-    def cleanup(self):
-        """종료 시 리소스 정리"""
-        self.connection_monitor.stop_monitoring()
-        self.tr_manager.cleanup()
+    async def tr_loop(self):
+        """TR 요청 루프"""
+        while True:
+            if not self.investor_manager.tr_schedule.empty():
+                schedule_time, stock_code, round_num = \
+                    self.investor_manager.tr_schedule.get()
+                
+                # 예정 시간까지 대기
+                wait_time = schedule_time - time.time()
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                
+                # TR 요청
+                try:
+                    await self.tr_scheduler.request_opt10059(stock_code, round_num)
+                except Exception as e:
+                    await self.error_recovery.handle_error(stock_code, e)
+                
+            await asyncio.sleep(0.1)
 ```
 
-## 9. 프로젝트 구조 (수정된 구조)
+## 9. 프로젝트 구조
+## 기존 구조에 통합하는 방법:
 
-### 1. **기존 구조 최대한 활용:**
+### 1. **필수 추가만 하면 되는 것들:**
 
 ```python
 # data_processor.py에 추가
 class InvestorNetManager:
-    # 수급 데이터 관리 (SimpleTRManager와 분리)
+    # 수급 데이터 관리 클래스 추가
     
 # kiwoom_client.py에 추가  
-class SimpleTRManager:
-    # 단순화된 TR 관리 (QTimer 방식)
+class SafeTRScheduler:
+    # TR 제한 관리 클래스 추가
     
 class ConnectionMonitor:
-    # QTimer 기반 연결 상태 모니터링
+    # 연결 상태 모니터링 클래스 추가
 ```
 
-### 2. **기존 파일 개선:**
-- `csv_writer.py` - 배치 크기 설정 가능 (1~100)
-- `config.py` - FID 선택 옵션, CSV 배치 설정 추가
-- `main.py` - QTimer 방식으로 전환, async 제거
+### 2. **이미 있는 파일들 활용:**
+- `csv_writer.py` - 배치 저장 기능만 추가
+- `config.py` - 설정값 업데이트
+- `main.py` - 클래스 임포트 수정
 
-### 3. **새로운 개선 사항:**
-- **FID 최적화**: 27/28(체결) vs 41/51(호가) 선택적 사용
-- **람다 클로저 안전성**: 변수 캐처 시 기본값 지정
-- **에러 시 TR 시간 기록 안함**: 성공 후에만 기록
-- **QTimer 참조 유지**: 클래스 멤버로 관리
+### 3. **새 파일 불필요한 것들:**
+- `investor_manager.py` → `data_processor.py`에 통합
+- `tr_scheduler.py` → `kiwoom_client.py`에 통합  
+- `error_recovery.py` → `kiwoom_client.py`에 간단히 추가
+- `debug_checker.py` → 별도 테스트 파일로 유지
 
 ```python
-# 예시: data_processor.py
+# data_processor.py
 class DataProcessor:
+    # 기존 코드...
+    
     def __init__(self):
         self.investor_manager = InvestorNetManager()  # 추가
-        # 기존 RSI, Disparity 등 계산 개선 적용
+        # 기존 코드...
 ```
 
-## 10. 개발 순서 (수정된 순서)
+## 10. 개발 순서
 
 1. **config.py 업데이트**
-   - 최적화된 FID 리스트 상수 추가 (27/28 또는 41/51)
-   - CSV 배치 크기 설정 (즉시/배치 선택 가능)
+   - FID 리스트 상수 추가
+   - TR 제한 설정값 수정 (초당 4회, 분당 90회)
    - 화면번호 베이스 설정
 
 2. **kiwoom_client.py 개선**
-   - register_real_data() 수정 (필수 FID만, opt_type 조건부 설정)
+   - register_real_data() 수정 (FID 완전 등록, opt_type="0")
    - OnReceiveRealData에 sRealType 분기 추가
-   - SimpleTRManager 클래스 추가 (단순화된 TR 관리)
-   - ConnectionMonitor 클래스 추가 (QTimer 방식)
+   - SafeTRScheduler 클래스 추가 (TR 제한 관리)
+   - ConnectionMonitor 클래스 추가 (연결 상태 체크)
 
 3. **data_processor.py 확장**
    - parse_real_data() 안전 처리 강화
    - InvestorNetManager 클래스 추가 (수급 데이터 관리)
-   - 지표 계산 개선 (RSI, Disparity, Stoch, vol_ratio)
+   - 틱 정의 명확화 (체결만 처리)
 
 4. **csv_writer.py 최적화**
-   - 설정 가능한 배치 저장 (1~100)
+   - 배치 저장 기능 추가 (100틱마다)
    - flush() 메서드 구현
    - 스레드 안전성 확보
 
-5. **main.py 통합 (단순화)**
-   - QTimer 기반 동기 방식으로 전환
+5. **main.py 통합**
    - 새 클래스들 임포트/초기화
-   - 초기 수급 데이터 즉시 로드
+   - 비동기 루프 구조 적용
+   - 초기 데이터 로드 추가
 
-6. **테스트 및 적용**
-   - FID 번호 실제 테스트로 확인 (27/28 vs 41/51)
-   - 람다 클로저 문제 수정 테스트
-   - QTimer 체인 정상 작동 확인
+6. **테스트 파일 실행**
+   - test_connection.py로 연결 확인
+   - test_realtime_simple.py로 데이터 흐름 검증
+   - test_csv_writer.py로 저장 확인
 
 
 ## 11. 테스트 방법
@@ -595,18 +611,17 @@ class DataProcessor:
 - 다중 종목: 1개 → 20개 점진 증가
 - 대량 종목: 20개 이상으로 안정성 테스트
 
-## 12. 주의사항 (수정된 사항)
+## 12. 주의사항
 - **로그인 정보 보안**: 환경 변수 관리
 - **틱 정의 준수**: 체결 이벤트만 틱으로 처리, CSV 저장
-- **FID 선택적 등록**: 필수 FID만 (27/28 또는 41/51) 성능 우선
+- **FID 완전 등록**: 41~80 범위 포함 필수
 - **sRealType 체크**: 이벤트 타입별 분기 처리
 - **데이터 파싱**: abs(int()) 처리 및 이상치 체크
 - **화면번호 분리**: 종목별 독립 화면번호
-- **SetRealReg opt_type**: 첫 종목 "0", 나머지 "1" (안정성 향상)
-- **TR 제한**: 60초 동일 TR 제한만 (단순화)
-- **QTimer 사용**: PyQt5 이벤트 루프 호환성 (async 금지)
-- **람다 클로저**: 변수 캐처 시 기본값 지정 필수
-- **CSV 배치 저장**: 설정 가능 (1~100), 즉시 저장 옵션
+- **SetRealReg opt_type**: "0" 사용 (신규 등록)
+- **TR 제한 준수**: 초당 4회, 분당 90회, 종목별 1분 제한
+- **메모리 관리**: deque maxlen 설정, 백프레셔 처리
+- **CSV 배치 저장**: 100틱마다 저장으로 I/O 최적화
 - **Windows/32비트 환경**: Python 3.8 32비트 필수
 
 ## 13. 로그 관리
@@ -615,19 +630,7 @@ class DataProcessor:
 - logs/ 디렉토리에 날짜별 파일 저장
 - 실시간 이벤트 빈도 및 에러 추적
 
-## 14. 최종 구현 확정 사항
-```markdown
-## 구현 확정 사항 (최종)
-1. QTimer 사용 (PyQt5 이벤트 루프)
-2. FID: 테스트 후 27/28(체결중심) 또는 41/51(호가중심) 선택
-3. 람다에서 변수 캐처 시 기본값 지정 필수
-4. TR 성공 후에만 시간 기록
-5. Timer 객체는 클래스 멤버로 관리
-6. opt_type: 첫 종목 "0", 나머지 "1"
-7. CSV 배치 크기 설정 가능 (1~100)
-```
-
-## 15. 코드 작성 참고
+## 14. 코드 작성 참고
 - GitHub pykiwoom 예제 참고 가능
 - 키움증권 OpenAPI 공식 샘플 참고
 - 참고 시 출처 주석 명시

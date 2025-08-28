@@ -21,14 +21,19 @@ class CSVWriter:
     - I/O 에러 처리 및 무결성 보장
     """
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: str = None, batch_size: int = None):
         self.base_dir = base_dir or DataConfig.CSV_DIR
+        self.batch_size = batch_size or getattr(DataConfig, 'CSV_BATCH_SIZE', 10)
         self.logger = logging.getLogger(__name__)
         
         # CSV 파일 핸들러 관리
         self.file_handles: Dict[str, any] = {}
         self.csv_writers: Dict[str, csv.DictWriter] = {}
         self.file_locks: Dict[str, threading.Lock] = {}
+        
+        # CLAUDE.md 배치 저장 기능 추가
+        self.batch_buffers: Dict[str, List[Dict]] = {}
+        self.write_lock = threading.Lock()
         
         # 저장 통계
         self.write_counts: Dict[str, int] = {}
@@ -37,10 +42,10 @@ class CSVWriter:
         # 디렉토리 생성
         self.ensure_directory()
         
-        # 33개 지표 헤더 정의
+        # 36개 지표 헤더 정의 (CLAUDE.md 수정사항)
         self.csv_headers = IndicatorConfig.ALL_INDICATORS
         
-        self.logger.info(f"CSVWriter 초기화: {self.base_dir}")
+        self.logger.info(f"CSVWriter 초기화: {self.base_dir}, 배치크기: {self.batch_size}")
     
     def ensure_directory(self):
         """디렉토리 생성"""

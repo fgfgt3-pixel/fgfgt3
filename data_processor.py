@@ -635,3 +635,115 @@ if __name__ == "__main__":
     
     result = processor.process_realdata('005930', '주식체결', sample_tick)
     print(f"결과: {result}")
+
+# ============================================================================
+# CLAUDE.md 수정사항 - InvestorNetManager 클래스 추가
+# ============================================================================
+
+class InvestorNetManager:
+    """수급 데이터 관리 - 단순하고 명확한 구조 (CLAUDE.md)"""
+    
+    def __init__(self, stock_codes):
+        self.stock_codes = stock_codes
+        self.logger = logging.getLogger(__name__)
+        
+        # 종목별 현재 수급 데이터 (TR에서 받은 최신 누적값)
+        self.current_net_vol = defaultdict(lambda: self._get_empty_dict())
+        
+        # 종목별 이전 수급 데이터 (delta 계산용)
+        self.previous_net_vol = defaultdict(lambda: self._get_empty_dict())
+        
+        # 종목별 마지막 업데이트 정보
+        self.last_update_info = defaultdict(lambda: {
+            'time': None,
+            'round': 0
+        })
+        
+    def _get_empty_dict(self):
+        """빈 수급 딕셔너리 반환"""
+        return {
+            'individual': 0,      # 개인
+            'foreign': 0,         # 외인
+            'institution': 0,     # 기관
+            'pension': 0,         # 연기금
+            'investment': 0,      # 투신
+            'insurance': 0,       # 보험
+            'private_fund': 0,    # 사모펀드
+            'bank': 0,           # 은행
+            'state': 0,          # 국가
+            'other_corp': 0,     # 기타법인
+            'program': 0         # 프로그램
+        }
+    
+    def update_from_tr(self, stock_code, tr_data):
+        """TR 응답 처리 - 누적값을 그대로 저장 (대체)"""
+        
+        # 1. 이전값 백업 (delta 계산용)
+        self.previous_net_vol[stock_code] = self.current_net_vol[stock_code].copy()
+        
+        # 2. 새로운 누적값으로 대체 (키움이 주는 값이 이미 누적값)
+        self.current_net_vol[stock_code] = {
+            'individual': int(tr_data.get('개인', 0)),
+            'foreign': int(tr_data.get('외인', 0)),
+            'institution': int(tr_data.get('기관', 0)),
+            'pension': int(tr_data.get('연기금', 0)),
+            'investment': int(tr_data.get('투신', 0)),
+            'insurance': int(tr_data.get('보험', 0)),
+            'private_fund': int(tr_data.get('사모펀드', 0)),
+            'bank': int(tr_data.get('은행', 0)),
+            'state': int(tr_data.get('국가', 0)),
+            'other_corp': int(tr_data.get('기타법인', 0)),
+            'program': int(tr_data.get('프로그램', 0))
+        }
+        
+        # 3. 업데이트 시간 기록
+        self.last_update_info[stock_code]['time'] = time.time()
+        self.last_update_info[stock_code]['round'] += 1
+        
+        self.logger.info(f"수급 데이터 업데이트: {stock_code}, Round {self.last_update_info[stock_code]['round']}")
+    
+    def get_data_for_tick(self, stock_code):
+        """틱마다 현재 저장된 값 반환"""
+        current = self.current_net_vol.get(stock_code, self._get_empty_dict())
+        previous = self.previous_net_vol.get(stock_code, self._get_empty_dict())
+        
+        # Delta 계산
+        delta = {}
+        for key in current.keys():
+            delta[key] = current[key] - previous.get(key, 0)
+            
+        return {
+            'net_vol': current,
+            'delta': delta,
+            'last_update': self.last_update_info[stock_code]['time']
+        }
+    
+    def get_csv_columns(self):
+        """CSV용 수급 컬럼 이름 리스트 반환"""
+        base_keys = list(self._get_empty_dict().keys())
+        columns = []
+        
+        # 현재 누적값 컬럼
+        for key in base_keys:
+            columns.append(f'net_{key}')
+        
+        # 델타 컬럼 (선택적)
+        for key in base_keys:
+            columns.append(f'delta_{key}')
+            
+        return columns
+    
+    def get_csv_data(self, stock_code):
+        """CSV 저장용 데이터 반환"""
+        data_dict = self.get_data_for_tick(stock_code)
+        csv_data = {}
+        
+        # 현재 누적값
+        for key, value in data_dict['net_vol'].items():
+            csv_data[f'net_{key}'] = value
+            
+        # 델타값
+        for key, value in data_dict['delta'].items():
+            csv_data[f'delta_{key}'] = value
+            
+        return csv_data

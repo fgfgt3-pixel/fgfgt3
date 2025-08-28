@@ -7,16 +7,16 @@ import sys
 import time
 import signal
 import logging
-import asyncio
 from datetime import datetime
 from typing import Dict, Any
+from PyQt5.QtCore import QTimer
 
 from config import (
     TARGET_STOCKS, KiwoomConfig, DataConfig, TRCode, 
     validate_config
 )
-from kiwoom_client import KiwoomClient
-from data_processor import DataProcessor
+from kiwoom_client import KiwoomClient, SimpleTRManager, ConnectionMonitor
+from data_processor import DataProcessor, InvestorNetManager
 from csv_writer import BatchCSVWriter
 
 class KiwoomDataCollector:
@@ -44,14 +44,15 @@ class KiwoomDataCollector:
         self.data_processor: DataProcessor = None
         self.csv_writer: BatchCSVWriter = None
         
+        # QTimer 기반 관리자들
+        self.tr_manager: SimpleTRManager = None
+        self.connection_monitor: ConnectionMonitor = None
+        self.investor_manager: InvestorNetManager = None
+        
         # 통계
         self.start_time = None
         self.tick_counts = {}
         self.last_stats_time = time.time()
-        
-        # 수급 데이터 업데이트 관리
-        self.investor_update_timer = None
-        self.last_investor_update = {}
         
         self.logger.info("=" * 60)
         self.logger.info("키움 OpenAPI+ 실시간 데이터 수집 시스템")
@@ -81,27 +82,39 @@ class KiwoomDataCollector:
             self.logger.info("1. 키움 클라이언트 초기화")
             self.kiwoom_client = KiwoomClient()
             
-            # 2. 데이터 프로세서 초기화
-            self.logger.info("2. 데이터 프로세서 초기화")
+            # 2. QTimer 기반 관리자들 초기화
+            self.logger.info("2. TR 관리자 초기화")
+            self.tr_manager = SimpleTRManager(self.kiwoom_client)
+            
+            self.logger.info("3. 연결 모니터링 초기화")
+            self.connection_monitor = ConnectionMonitor(self.kiwoom_client)
+            
+            self.logger.info("4. 수급 데이터 관리자 초기화")
+            self.investor_manager = InvestorNetManager(self.target_stocks)
+            
+            # 5. 데이터 프로세서 초기화
+            self.logger.info("5. 데이터 프로세서 초기화")
             self.data_processor = DataProcessor(self.target_stocks, self.kiwoom_client)
             
-            # 3. CSV 저장소 초기화
-            self.logger.info("3. CSV 저장소 초기화")
+            # 6. CSV 저장소 초기화
+            self.logger.info("6. CSV 저장소 초기화")
             self.csv_writer = BatchCSVWriter(
                 base_dir=DataConfig.CSV_DIR,
-                batch_size=50  # 50틱마다 배치 저장
+                batch_size=DataConfig.CSV_BATCH_SIZE
             )
             
-            # 4. 콜백 함수 연결
-            self.logger.info("4. 콜백 함수 연결")
+            # 7. 콜백 함수 연결
+            self.logger.info("7. 콜백 함수 연결")
             self.kiwoom_client.set_realdata_callback(self.on_realdata_received)
             self.kiwoom_client.set_tr_callback(self.on_tr_data_received)
             self.data_processor.set_indicator_callback(self.on_indicators_calculated)
             
-            # 5. 통계 초기화
+            # 8. TR 관리자와 수급 관리자 연동 (콜백 대신 직접 참조)
+            self.tr_manager.investor_manager = self.investor_manager
+            
+            # 9. 통계 초기화
             for stock_code in self.target_stocks:
                 self.tick_counts[stock_code] = 0
-                self.last_investor_update[stock_code] = 0
             
             self.logger.info("모든 모듈 초기화 완료")
             return True
@@ -125,9 +138,16 @@ class KiwoomDataCollector:
                 self.logger.error("실시간 데이터 등록 실패")
                 return False
             
-            # 전일고가 데이터 초기 요청
-            self.logger.info("전일고가 데이터 요청...")
-            self.request_initial_data()
+            # 수급 데이터 TR 스케줄링 시작 (즉시 첫 요청)
+            self.logger.info("수급 데이터 TR 스케줄링 시작...")
+            for i, stock_code in enumerate(self.target_stocks):
+                # 0.2초씩 지연하여 순차 요청
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(i * 200, lambda sc=stock_code: self.tr_manager.request_opt10059(sc))
+            
+            # 연결 모니터링 시작
+            self.logger.info("연결 모니터링 시작...")
+            self.connection_monitor.start_monitoring()
             
             self.logger.info("연결 및 등록 완료")
             return True
@@ -136,70 +156,7 @@ class KiwoomDataCollector:
             self.logger.error(f"연결 및 등록 실패: {e}")
             return False
     
-    def start_investor_data_updates(self):
-        """수급 데이터 주기적 업데이트 시작"""
-        try:
-            from PyQt5.QtCore import QTimer
-            
-            self.investor_update_timer = QTimer()
-            self.investor_update_timer.timeout.connect(self.update_investor_data)
-            self.investor_update_timer.start(DataConfig.INVESTOR_UPDATE_INTERVAL * 1000)  # 밀리초 단위
-            
-            self.logger.info(f"수급 데이터 업데이트 시작: {DataConfig.INVESTOR_UPDATE_INTERVAL}초 간격")
-            
-        except Exception as e:
-            self.logger.error(f"수급 데이터 업데이트 시작 실패: {e}")
     
-    def update_investor_data(self):
-        """수급 데이터 업데이트 (OPT10059 TR 요청)"""
-        try:
-            current_time = time.time()
-            today = datetime.now().strftime("%Y%m%d")
-            
-            self.logger.info(f"[수급업데이트시작] 타이머 트리거 - 종목 {len(self.target_stocks)}개")
-            
-            for stock_code in self.target_stocks:
-                # 중복 요청 방지 (1분 이내 재요청 금지)
-                last_update = self.last_investor_update[stock_code]
-                time_diff = current_time - last_update
-                
-                if time_diff < 60:
-                    self.logger.debug(f"[수급스킵] {stock_code}: {time_diff:.1f}초 전 요청함 (60초 대기 중)")
-                    continue
-                
-                # TR 요청 로그
-                self.logger.info(f"[수급TR요청] {stock_code}: 기준일자={today}")
-                
-                # TR 요청
-                tr_inputs = {
-                    "종목코드": stock_code,
-                    "기준일자": today,
-                    "수정주가구분": "1"
-                }
-                
-                request_success = self.kiwoom_client.request_tr(TRCode.INVESTOR_NET_VOL, tr_inputs)
-                if request_success:
-                    self.last_investor_update[stock_code] = current_time
-                    self.logger.info(f"[수급TR성공] {stock_code}: TR 큐에 추가됨")
-                else:
-                    self.logger.error(f"[수급TR실패] {stock_code}: TR 요청 실패")
-                
-                # API 제한 방지 (asyncio 대신 time.sleep 사용)
-                time.sleep(0.2)
-                
-        except Exception as e:
-            self.logger.error(f"수급 데이터 업데이트 오류: {e}")
-            import traceback
-            self.logger.error(f"수급 업데이트 상세 오류: {traceback.format_exc()}")
-    
-    def request_initial_data(self):
-        """초기 데이터 요청"""
-        try:
-            # 초기 데이터 요청이 필요한 경우 여기에 추가
-            self.logger.info(f"초기 데이터 요청 완료 - 대상 종목: {len(self.target_stocks)}개")
-                
-        except Exception as e:
-            self.logger.error(f"초기 데이터 요청 오류: {e}")
     
     # ========================================================================
     # 콜백 함수들
@@ -224,7 +181,13 @@ class KiwoomDataCollector:
     def on_tr_data_received(self, tr_code: str, tr_data: Dict):
         """TR 데이터 수신 콜백"""
         try:
-            # 데이터 프로세서로 전달
+            # TR Manager로 전달하여 수급 데이터 처리
+            if tr_code == TRCode.INVESTOR_NET_VOL:
+                stock_code = tr_data.get('종목코드', '')
+                self.investor_manager.update_from_tr(stock_code, tr_data)
+                self.logger.info(f"[수급TR처리완료] {stock_code}")
+            
+            # 기타 TR 데이터는 데이터 프로세서로
             self.data_processor.process_tr_data(tr_code, tr_data)
             
             self.logger.debug(f"TR 데이터 처리 완료: {tr_code}")
@@ -284,8 +247,6 @@ class KiwoomDataCollector:
                 self.logger.error("연결 및 등록 실패")
                 return False
             
-            # 수급 데이터 업데이트 시작
-            self.start_investor_data_updates()
             
             # 시그널 핸들러 설정
             signal.signal(signal.SIGINT, self.signal_handler)
@@ -303,9 +264,6 @@ class KiwoomDataCollector:
             # 주기적 상태 리포트 시작
             self.start_status_reporting()
             
-            # 수급 데이터 주기적 업데이트 시작
-            self.start_investor_data_updates()
-            
             # 이벤트 루프 실행
             if self.kiwoom_client and self.kiwoom_client.app:
                 return self.kiwoom_client.app.exec_()
@@ -322,8 +280,6 @@ class KiwoomDataCollector:
     def start_status_reporting(self):
         """주기적 상태 리포트 시작"""
         try:
-            from PyQt5.QtCore import QTimer
-            
             status_timer = QTimer()
             status_timer.timeout.connect(self.print_status_report)
             status_timer.start(60000)  # 1분마다

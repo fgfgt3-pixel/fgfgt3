@@ -1,376 +1,285 @@
-### stock_code
-#### 문제사항 검토
-이 지표는 CSV에서 항상 "5930"으로 고정되어 나타납니다 (unique 값 1개). 이는 코드가 단일 종목(삼성전자, 코드 005930)만 처리하도록 설정되어 있거나, 데이터 수집 시 종목 코드가 동적으로 업데이트되지 않아 발생합니다. config.py에서 stock_codes가 단일 값으로 고정된 경우나, kiwoom_client.py에서 종목별 루프가 제대로 작동하지 않을 수 있습니다. 다중 종목 지원을 의도했다면 문제지만, 단일 종목이라면 정상일 수 있습니다.
+VSCode Claude의 지적이 매우 타당.
 
-재검토 결과
-문제사항은 정확하나, 단일 종목이 의도된 경우 정상. 다중 지원 제안 OK, 하지만 request_real_time_data 메서드가 kiwoom_client.py에 구현되어 있어야 함 (FID 10,20 등 등록 가정).
-수정된 개선 코드 제안
-import logging  # 에러 핸들링 강화
+## 수정 방안
 
-# config.py 수정: 다중 종목 지원
-class StockConfig:
-    STOCK_CODES = ['005930', '000660']  # 예시로 추가 종목 포함
+### 1. **비동기 제거 - 가장 중요**
+```python
+# 변경 전 (async)
+async def request_opt10059(self, stock_code, round_num):
+    await self._check_limits()
 
-# main.py의 KiwoomDataCollector 클래스 init에 추가
-def __init__(self):
-    self.stock_codes = StockConfig.STOCK_CODES
+# 변경 후 (동기식)
+def request_opt10059(self, stock_code, round_num):
+    self._check_limits()  # time.sleep() 사용
+    
+# threading.Timer 사용
+from threading import Timer
+Timer(60.0, self.request_opt10059, args=[stock_code, round_num]).start()
+```
+
+### 2. **opt_type 유지**
+```python
+# 첫 종목만 "0", 나머지는 "1" 유지
+opt_type = "0" if idx == 0 else "1"
+```
+
+### 3. **FID 최적화**
+```python
+# 필수 FID만
+fid_list = "10;11;12;13;14;15;20;41;51;61;71"  # 1호가만
+# 전체 호가 필요시 점진적 추가
+```
+
+### 4. **TR 관리 단순화**
+```python
+class SimpleTRManager:
+    def __init__(self):
+        self.last_opt10059 = {}  # 종목별 마지막 시간만
+    
+    def can_request(self, stock_code):
+        if stock_code in self.last_opt10059:
+            if time.time() - self.last_opt10059[stock_code] < 60:
+                return False
+        return True
+```
+
+### 5. **CSV 즉시 저장 옵션**
+```python
+# config.py
+CSV_BATCH_SIZE = 1  # 즉시 저장
+# CSV_BATCH_SIZE = 100  # 배치 저장 (선택)
+```
+
+## CLAUDE.md 수정 제안
+
+```markdown
+## 구현 지침 (수정)
+- PyQt5 이벤트 루프 사용 (asyncio 제거)
+- threading.Timer로 스케줄링
+- 필수 FID만 등록 (성능 우선)
+- 단순한 60초 타이머 TR 관리
+- CSV 즉시 저장 기본값
+```
+
+이렇게 수정하면:
+1. 키움 API와 완벽 호환
+2. 기존 코드 최대한 활용
+3. 안정성 우선
+4. 점진적 개선 가능
+
+
+## TR 단순화해도 누적 유지되는 이유:
+SimpleTRManager에서도 누적 데이터 유지는 문제없음
+
+
+```python
+class SimpleTRManager:
+    def __init__(self):
+        self.last_opt10059 = {}  # 종목별 마지막 시간만
+        # 데이터는 DataProcessor가 관리
+    
+    def can_request(self, stock_code):
+        if stock_code in self.last_opt10059:
+            if time.time() - self.last_opt10059[stock_code] < 60:
+                return False
+        self.last_opt10059[stock_code] = time.time()
+        return True
+
+class DataProcessor:
+    def __init__(self):
+        # 누적 데이터 유지 (기존대로)
+        self.current_net_vol = {}  # 현재값
+        self.previous_net_vol = {}  # 이전값
+        
+    def update_from_tr(self, stock_code, tr_data):
+        # 1분마다 TR 응답 시
+        self.previous_net_vol[stock_code] = self.current_net_vol.get(stock_code, {}).copy()
+        self.current_net_vol[stock_code] = tr_data  # 대체(=)
+        
+    def get_data_for_tick(self, stock_code):
+        # 틱마다 현재 저장된 값 반환
+        return self.current_net_vol.get(stock_code, {})
+```
+
+타임라인:
+- 09:00 - TR 요청 → current_net_vol 저장
+- 09:00~09:01 - 모든 틱에 current_net_vol 값 사용
+- 09:01 - TR 요청 → previous = current, current = 새값
+- 09:01~09:02 - 업데이트된 current_net_vol 사용
+
+**핵심**: TR 관리(SimpleTRManager)와 데이터 관리(DataProcessor)가 분리되어 있어서, TR 관리를 단순화해도 데이터 누적 로직은 영향받지 않음
+
+VSCode Claude의 추가 지적사항들이 정확합니다. 특히 중요한 문제들을 짚었네요.
+
+## 핵심 수정사항
+
+### 1. **QTimer 사용 (threading.Timer 대신)**
+```python
+from PyQt5.QtCore import QTimer
+
+class SimpleTRManager:
+    def __init__(self):
+        self.timers = {}  # 종목별 QTimer 관리
+        
+    def schedule_next_request(self, stock_code):
+        if stock_code in self.timers:
+            self.timers[stock_code].stop()
+            
+        timer = QTimer()
+        timer.timeout.connect(lambda: self.request_with_retry(stock_code))
+        timer.setSingleShot(True)
+        timer.start(60000)  # 60초
+        self.timers[stock_code] = timer
+        
+    def cleanup(self):
+        for timer in self.timers.values():
+            timer.stop()
+```
+
+### 2. **FID 수정 (호가 정확성)**
+```python
+# FID 27, 28이 맞음 (41, 51 아님)
+fid_list = "10;11;12;13;14;15;20;27;28;61;71"
+# 10: 현재가, 27: 매도호가1, 28: 매수호가1
+```
+
+### 3. **초기 데이터 즉시 로드**
+```python
+def initialize(self):
+    # 프로그램 시작 즉시 TR 요청
+    for i, stock_code in enumerate(self.stock_codes):
+        QTimer.singleShot(i * 200, lambda code=stock_code: 
+                         self.request_opt10059(code))
+```
+
+### 4. **에러 시에도 Timer 유지**
+```python
+def request_with_retry(self, stock_code):
     try:
-        for code in self.stock_codes:
-            self.kiwoom_client.request_real_time_data(code)  # kiwoom_client.py의 메서드 호출 가정
+        if self.can_request(stock_code):
+            self.request_opt10059(stock_code)
     except Exception as e:
-        logging.error(f"실시간 데이터 등록 실패: {e}")
+        logging.error(f"TR 실패 {stock_code}: {e}")
+    finally:
+        # 에러 여부 관계없이 다음 타이머 예약
+        QTimer.singleShot(60000, lambda: 
+                         self.request_with_retry(stock_code))
+```
 
-### prev_day_high
-#### 문제사항 검토
-CSV에서 대부분 0으로 고정되며, 가끔 71000 같은 값만 등장합니다 (unique 값 2개, 98% 이상 0). 이는 이전 날 고가 데이터를 제대로 fetch하지 못하거나, 초기화 후 업데이트되지 않아 발생합니다. kiwoom_client.py에서 Opt10081 같은 TR로 이전 날 데이터를 요청하지 않거나, 캐싱 실패가 원인일 수 있습니다.
+## CLAUDE.md 최종 수정
 
-prev_day_high
-재검토 결과
-Opt10081 TR 사용 OK, 필드명 "전일고가" 검색 확인. 하지만 OnReceiveTrData 핸들러 상세 필요.
-수정된 개선 코드 제안
-# kiwoom_client.py에 추가: 이전 날 고가 fetch 메서드
-def get_prev_day_high(self, stock_code):
+```markdown
+## 구현 필수사항
+1. QTimer 사용 (threading.Timer 금지)
+2. FID 27,28 사용 (매도/매수호가1)
+3. 프로그램 시작 시 즉시 TR 요청
+4. 에러 처리 + Timer 체인 유지
+5. 종료 시 timer.stop() 호출
+```
+
+이 수정사항들을 반영하면 안정적으로 작동할 것입니다.
+
+사용자 질문: 앞서 제안한 내용과 중복되거나 배치되는 내용 있어?
+
+네, 배치되는 내용이 있습니다.
+
+## 주요 충돌 사항:
+
+### 1. **async/await vs QTimer**
+- **이전**: async/await + asyncio 사용
+- **수정**: QTimer (동기식) 사용
+- **충돌**: 완전히 다른 패러다임
+
+### 2. **FID 번호 불일치**
+- **이전**: "41~50(매도호가), 51~60(매수호가)"
+- **수정**: "27(매도호가1), 28(매수호가1)"
+- **문제**: FID 번호 체계가 다름
+
+### 3. **Timer 구현 방식**
+- **이전**: PriorityQueue + asyncio.sleep
+- **중간**: threading.Timer
+- **최종**: QTimer
+- **충돌**: 3번 변경됨
+
+### 4. **opt_type 설정**
+- **이전**: 모든 종목 "0" (신규 등록)
+- **수정**: 첫 종목만 "0", 나머지 "1"
+- **충돌**: 정반대 접근
+
+## 통합 권장안:
+
+```python
+# 1. QTimer만 사용 (async 완전 제거)
+# 2. FID는 키움 공식 문서 확인 필요
+#    - 27/28이 맞다면 그대로
+#    - 41/51이 맞다면 수정
+# 3. opt_type은 테스트 후 결정
+#    - 보통 첫 번째 "0", 추가 "1"이 안전
+```
+
+**핵심**: 키움 API는 동기식이므로 QTimer 방식이 맞고, FID는 실제 테스트로 확인 필요합니다.
+
+VSCode Claude의 검토가 매우 정확합니다. 4개의 구체적인 문제점을 잘 파악했네요.
+
+## 최종 수정 사항
+
+### 1. **FID 번호 확정 필요**
+```python
+# 키움 OpenAPI 개발가이드 확인 결과:
+# 실시간 시세: FID 41~50 (매도호가1~10)
+#            FID 51~60 (매수호가1~10)
+# 주문 체결: FID 27 (최우선매도호가)
+#           FID 28 (최우선매수호가)
+
+# 용도에 따라 선택:
+fid_list = "10;13;27;28"  # 체결가 중심
+# 또는
+fid_list = "10;13;41;51"  # 호가 잔량 중심
+```
+
+### 2. **람다 클로저 수정**
+```python
+# 수정 전 (버그)
+for i, stock_code in enumerate(self.stock_codes):
+    QTimer.singleShot(i * 200, lambda: self.request_opt10059(stock_code))
+
+# 수정 후 (정상)
+for i, stock_code in enumerate(self.stock_codes):
+    QTimer.singleShot(i * 200, lambda sc=stock_code: self.request_opt10059(sc))
+```
+
+### 3. **시간 기록 위치 수정**
+```python
+def request_opt10059(self, stock_code):
+    if not self.can_request(stock_code):
+        return False
+    
     try:
-        self.kiwoom.SetInputValue("종목코드", stock_code)
-        self.kiwoom.SetInputValue("기준일자", datetime.now().strftime('%Y%m%d'))
-        self.kiwoom.SetInputValue("수정주가구분", "1")
-        self.kiwoom.CommRqData("opt10081", "opt10081", 0, "0101")
+        # TR 요청
+        self.kiwoom.CommRqData(...)
+        # 성공 후에만 시간 기록
+        self.last_opt10059[stock_code] = time.time()
+        return True
     except Exception as e:
-        logging.error(f"Opt10081 요청 실패: {e}")
-        return 0
-
-# OnReceiveTrData에 추가 (kiwoom_client.py)
-if tr_code == "opt10081":
-    self.prev_day_high[stock_code] = int(self.kiwoom.GetCommData(tr_code, rq_name, 0, "전일고가") or 0)
-
-# data_processor.py의 calculate_indicators에 호출 추가
-indicators['prev_day_high'] = self.kiwoom_client.prev_day_high.get(stock_code, 0)
-
-### rsi14
-#### 문제사항 검토
-대부분 50 근처 값(예: 50, 45.45, 55.55)으로 반복되며, 변동 범위가 좁습니다 (unique 값 16개, 평균 73.3). 이는 14기간 평균 gain/loss 계산이 제대로 누적되지 않거나, 초기값(50)으로 고착된 상태입니다. data_processor.py에서 RSI 계산 시 데이터 버퍼가 부족하거나, gain/loss 업데이트 로직 오류가 원인일 수 있습니다.
-
-재검토 결과
-기본 공식 OK, 하지만 Wilder RSI(EMA 사용)가 표준 – SMA 대신 EMA로 수정.
-수정된 개선 코드 제안
-import numpy as np
-
-# data_processor.py에 RSI 계산 메서드 수정/추가 (Wilder EMA)
-def calculate_rsi(self, prices, period=14):
-    if len(prices) < period + 1:
-        return 50  # 초기값
-    deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-# calculate_indicators에서 호출
-indicators['rsi14'] = self.calculate_rsi(self.price_history[stock_code], 14)
-
-### disparity
-#### 문제사항 검토
-100 근처 값(예: 100, 99.97, 100.02)으로 반복되며, 초기 행에서만 약간 변동합니다 (unique 값 19개, 평균 99.66). 이는 가격과 MA의 차이가 제대로 계산되지 않거나, MA가 항상 가격과 유사하게 고정되어 발생합니다. data_processor.py에서 MA 기간이 짧거나, disparity 공식이 단순 (Close / MA * 100)으로 구현되지 않았을 수 있습니다.
-
-재검토 결과
-제안 공식 (Close - MA)/MA * 100이 아닌, 표준 (Close / MA) * 100으로 수정 필요 (검색 확인).
-수정된 개선 코드 제안
-import numpy as np
-
-# data_processor.py에 disparity 계산 메서드 추가
-def calculate_disparity(self, prices, close, period=5):
-    if len(prices) < period:
-        return 100  # 초기값
-    ma = np.mean(prices[-period:])
-    disparity = (close / ma) * 100 if ma != 0 else 100
-    return disparity
-
-# calculate_indicators에서 호출
-indicators['disparity'] = self.calculate_disparity(self.price_history[stock_code], current_price)
-
-### stoch_k
-#### 문제사항 검토
-0, 50, 100 값만 반복되며, 변동이 거의 없습니다 (unique 값 3개, 평균 53.5). 이는 기간 내 Highest High / Lowest Low 계산이 제대로 되지 않거나, 초기화 값으로 고착된 상태입니다. data_processor.py에서 Stochastic Oscillator %K 계산 시 데이터 부족이나 잘못된 범위 사용이 원인일 수 있습니다.
-
-재검토 결과
-표준 공식 맞음. history 버퍼 확인 강조.
-수정된 개선 코드 제안
-# data_processor.py에 stoch_k 계산 메서드 수정
-def calculate_stoch_k(self, highs, lows, close, period=14):
-    try:
-        if len(highs) < period:
-            return 50  # 초기값
-        highest_high = max(highs[-period:])
-        lowest_low = min(lows[-period:])
-        stoch_k = (close - lowest_low) / (highest_high - lowest_low) * 100 if highest_high != lowest_low else 50
-        return stoch_k
-    except Exception as e:
-        logging.error(f"Stoch K 계산 실패: {e}")
-        return 50
-
-# calculate_indicators에서 호출 (high_history, low_history 필요)
-indicators['stoch_k'] = self.calculate_stoch_k(self.high_history[stock_code], self.low_history[stock_code], current_price)
-
-### stoch_d
-#### 문제사항 검토
-33.33, 50, 66.67 등 제한적 값만 반복됩니다 (unique 값 6개, 평균 53.4). 이는 %D가 %K의 SMA(3기간)로 계산되지 않거나, %K의 고착으로 인해 연쇄적으로 문제가 발생합니다. data_processor.py에서 %D 계산 로직이 누락되거나 불완전할 수 있습니다.
-
-재검토 결과
-표준 %K의 3기간 SMA 맞음.
-수정된 개선 코드 제안
-import numpy as np
-
-# data_processor.py에 stoch_d 계산 메서드 추가 (stoch_k_history 필요)
-def calculate_stoch_d(self, stoch_k_history, period=3):
-    if len(stoch_k_history) < period:
-        return 50  # 초기값
-    stoch_d = np.mean(stoch_k_history[-period:])
-    return stoch_d
-
-# calculate_indicators에서 호출 (stoch_k 계산 후)
-indicators['stoch_d'] = self.calculate_stoch_d(self.stoch_k_history[stock_code])
-
-### vol_ratio
-#### 문제사항 검토
-대부분 1 또는 0으로 나타나며, 실제 변동이 부족합니다 (unique 값 105개지만 대부분 고정 패턴). 이는 거래량 비율 계산이 현재/평균 거래량으로 제대로 되지 않거나, up/down volume 분리가 안 된 상태입니다. data_processor.py에서 vol_ratio 공식이 단순하거나 데이터 누적 오류가 원인일 수 있습니다.
-
-재검토 결과
-제안 OK, 하지만 True Range / ATR(14)로 더 표준화 (검색 확인).
-수정된 개선 코드 제안
-import numpy as np
-
-# data_processor.py에 vol_ratio 계산 메서드 추가 (history 필요)
-def calculate_vol_ratio(self, high, low, prev_close, atr_history, period=14):
-    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))  # True Range
-    if len(atr_history) < period:
-        return 1  # 초기값
-    atr = np.mean(atr_history[-period:])  # ATR (SMA for simplicity)
-    vol_ratio = tr / atr if atr != 0 else 1
-    return vol_ratio
-
-# calculate_indicators에서 호출
-indicators['vol_ratio'] = self.calculate_vol_ratio(current_high, current_low, prev_close, self.atr_history[stock_code])
-
-### spread
-#### 문제사항 검토
-항상 0으로 고정됩니다 (unique 값 1개). 이는 bid/ask 가격 차이 계산이 안 되거나, 실시간 호가 데이터가 fetch되지 않아 발생합니다. kiwoom_client.py에서 호가 데이터 요청(Opt10005 등)이 누락되었을 수 있습니다.
-
-재검토 결과
-Opt10005(TR) 대신 실시간 FID(41 ask1, 46 bid1) 사용이 더 적합 (실시간 프로젝트).
-수정된 개선 코드 제안
-# kiwoom_client.py에 실시간 호가 등록 (init or connect 후)
-def register_real_hoga(self, stock_code):
-    self.kiwoom.SetRealReg("1000", stock_code, "41;46", "1")  # ask1, bid1 FID
-
-# OnReceiveRealData에 추가
-if fid == 41: self.ask1 = int(real_data)
-elif fid == 46: self.bid1 = int(real_data)
-
-# data_processor.py의 calculate_indicators에 추가
-indicators['spread'] = self.kiwoom_client.ask1 - self.kiwoom_client.bid1 if hasattr(self.kiwoom_client, 'ask1') else 0
-
-### Tree of Thought 협업 프로세스
-
-#### 단계 1: 초기 생각 공유
-- **전문가 1 (Kiwoom API 전문가)**: 제안된 코드가 Kiwoom Open API의 TR 및 FID 규칙을 따르는지 확인. 예: Opt10081은 일봉 데이터로 적합하지만, "전일고가" 필드가 정확히 맞는지 API 문서 검색 결과 확인 필요. Opt10005는 호가 TR로 유효하나, 실시간 호가 FID(41~50 price, 61~70 qty)가 더 적합할 수 있음. stock_code는 config에서 리스트로 OK, 하지만 request_real_time_data 메서드가 실제 구현되었는지 확인. 전체적으로 API 호출 안전성(CommRqData 파라미터, OnReceiveTrData 핸들러)이 부족.
-- **전문가 2 (기술 지표 전문가)**: 표준 공식 검토. RSI는 deltas 사용 OK지만, 평균 gain/loss가 SMA로 구현되어 EMA 버전(표준 Wilder RSI)과 다를 수 있음. Disparity는 검색 결과 (close / ma) * 100이 표준인데, 제안은 (close - ma)/ma * 100으로 약간 다름 – 수정 필요. Stochastic %K/%D는 14/3 기간 표준 맞음. vol_ratio는 (High-Low)/EMA(range)로 OK, 하지만 True Range 사용이 더 정확. spread는 ask1 - bid1로 단순 OK.
-- **전문가 3 (소프트웨어 개발 전문가)**: 코드 구조 검토. np.diff, np.mean 등 numpy 종속성 가정 OK지만, import 확인 필요. 버퍼 길이 체크(if len < period)는 좋지만, 에러 핸들링(division by zero) 강화. 다중 종목 지원은 루프 OK, 하지만 비동기(asyncio) 고려 안 됨. 초기값(50, 100 등)이 임의 – 데이터 부족 시 NaN 반환 고려.
-
-#### 단계 2: 의견 교환 및 조정
-- **전문가 1**: 전문가 2의 Disparity 공식 지적 동의 – API에서 MA 데이터 fetch 시 맞춤. vol_ratio에 True Range 통합 제안. spread는 Opt10005(TR) 대신 실시간 FID로 변경, 왜냐하면 실시간 데이터 수집 프로젝트라서. stock_code는 단일 종목 정상일 수 있으니, 유연성 강조.
-- **전문가 2**: 전문가 1의 FID 제안 좋음 – 호가 실시간으로 spread 동적 계산. RSI를 EMA로 업그레이드(Wilder 공식). Stochastic history 버퍼가 제대로 누적되는지 확인. prev_day_high 캐싱 추가 제안.
-- **전문가 3**: 전문가 1/2의 API/공식 조정 동의. 코드에 import numpy as np 추가, 에러 핸들링(try-except) 삽입. 전체 코드가 stateful인지 확인 – history 리스트가 클래스 변수로 유지.
-
-#### 단계 3: 추가 조정 및 탈락 판단
-- **전문가 1**: spread를 실시간 FID로 변경하면 더 나음. Disparity 공식 수정 필수.
-- **전문가 2**: vol_ratio에 ATR 통합 – (current_range / ATR)로.
-- **전문가 3**: 모든 코드에 logging 추가 제안. 잘못된 방향 없음 – 모두 유지.
-- **합의**: Disparity 공식 수정, RSI EMA 사용, spread 실시간 FID, vol_ratio ATR. 나머지 OK.
-
-#### 단계 4: 최종 유망 해결책 도출
-- 합의된 수정: Disparity를 (close / ma) * 100으로. RSI를 EMA 기반 Wilder로. spread를 FID 실시간. vol_ratio를 True Range / ATR로. 나머지 제안 유지, 에러 핸들링 추가.
-
-Role: Kiwoom API Developer
-
-### stock_code
-#### 재검토 결과
-문제사항은 정확하나, 단일 종목이 의도된 경우 정상. 다중 지원 제안 OK, 하지만 request_real_time_data 메서드가 kiwoom_client.py에 구현되어 있어야 함 (FID 10,20 등 등록 가정).
-
-#### 수정된 개선 코드 제안
-```python
-import logging  # 에러 핸들링 강화
-
-# config.py 수정: 다중 종목 지원
-class StockConfig:
-    STOCK_CODES = ['005930', '000660']  # 예시로 추가 종목 포함
-
-# main.py의 KiwoomDataCollector 클래스 init에 추가
-def __init__(self):
-    self.stock_codes = StockConfig.STOCK_CODES
-    try:
-        for code in self.stock_codes:
-            self.kiwoom_client.request_real_time_data(code)  # kiwoom_client.py의 메서드 호출 가정
-    except Exception as e:
-        logging.error(f"실시간 데이터 등록 실패: {e}")
+        logging.error(f"TR 실패: {e}")
+        # 실패 시 시간 기록 안함
+        return False
 ```
 
-### prev_day_high
-#### 재검토 결과
-Opt10081 TR 사용 OK, 필드명 "전일고가" 검색 확인. 하지만 OnReceiveTrData 핸들러 상세 필요.
-
-#### 수정된 개선 코드 제안
+### 4. **QTimer 참조 유지 (이미 제안됨)**
 ```python
-# kiwoom_client.py에 추가: 이전 날 고가 fetch 메서드
-def get_prev_day_high(self, stock_code):
-    try:
-        self.kiwoom.SetInputValue("종목코드", stock_code)
-        self.kiwoom.SetInputValue("기준일자", datetime.now().strftime('%Y%m%d'))
-        self.kiwoom.SetInputValue("수정주가구분", "1")
-        self.kiwoom.CommRqData("opt10081", "opt10081", 0, "0101")
-    except Exception as e:
-        logging.error(f"Opt10081 요청 실패: {e}")
-        return 0
-
-# OnReceiveTrData에 추가 (kiwoom_client.py)
-if tr_code == "opt10081":
-    self.prev_day_high[stock_code] = int(self.kiwoom.GetCommData(tr_code, rq_name, 0, "전일고가") or 0)
-
-# data_processor.py의 calculate_indicators에 호출 추가
-indicators['prev_day_high'] = self.kiwoom_client.prev_day_high.get(stock_code, 0)
+self.timers[stock_code] = timer  # 클래스 멤버로 저장
 ```
 
-### rsi14
-#### 재검토 결과
-기본 공식 OK, 하지만 Wilder RSI(EMA 사용)가 표준 – SMA 대신 EMA로 수정.
+## CLAUDE.md 최종 확정 사항
 
-#### 수정된 개선 코드 제안
-```python
-import numpy as np
-
-# data_processor.py에 RSI 계산 메서드 수정/추가 (Wilder EMA)
-def calculate_rsi(self, prices, period=14):
-    if len(prices) < period + 1:
-        return 50  # 초기값
-    deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-# calculate_indicators에서 호출
-indicators['rsi14'] = self.calculate_rsi(self.price_history[stock_code], 14)
+```markdown
+## 구현 확정 사항
+1. QTimer 사용 (PyQt5 이벤트 루프)
+2. FID: 테스트 후 27/28 또는 41/51 선택
+3. 람다에서 변수 캡처 시 기본값 지정
+4. TR 성공 후에만 시간 기록
+5. Timer 객체는 클래스 멤버로 관리
 ```
 
-### disparity
-#### 재검토 결과
-제안 공식 (Close - MA)/MA * 100이 아닌, 표준 (Close / MA) * 100으로 수정 필요 (검색 확인).
-
-#### 수정된 개선 코드 제안
-```python
-import numpy as np
-
-# data_processor.py에 disparity 계산 메서드 추가
-def calculate_disparity(self, prices, close, period=5):
-    if len(prices) < period:
-        return 100  # 초기값
-    ma = np.mean(prices[-period:])
-    disparity = (close / ma) * 100 if ma != 0 else 100
-    return disparity
-
-# calculate_indicators에서 호출
-indicators['disparity'] = self.calculate_disparity(self.price_history[stock_code], current_price)
-```
-
-### stoch_k
-#### 재검토 결과
-표준 공식 맞음. history 버퍼 확인 강조.
-
-#### 수정된 개선 코드 제안
-```python
-# data_processor.py에 stoch_k 계산 메서드 수정
-def calculate_stoch_k(self, highs, lows, close, period=14):
-    try:
-        if len(highs) < period:
-            return 50  # 초기값
-        highest_high = max(highs[-period:])
-        lowest_low = min(lows[-period:])
-        stoch_k = (close - lowest_low) / (highest_high - lowest_low) * 100 if highest_high != lowest_low else 50
-        return stoch_k
-    except Exception as e:
-        logging.error(f"Stoch K 계산 실패: {e}")
-        return 50
-
-# calculate_indicators에서 호출 (high_history, low_history 필요)
-indicators['stoch_k'] = self.calculate_stoch_k(self.high_history[stock_code], self.low_history[stock_code], current_price)
-```
-
-### stoch_d
-#### 재검토 결과
-표준 %K의 3기간 SMA 맞음.
-
-#### 수정된 개선 코드 제안
-```python
-import numpy as np
-
-# data_processor.py에 stoch_d 계산 메서드 추가 (stoch_k_history 필요)
-def calculate_stoch_d(self, stoch_k_history, period=3):
-    if len(stoch_k_history) < period:
-        return 50  # 초기값
-    stoch_d = np.mean(stoch_k_history[-period:])
-    return stoch_d
-
-# calculate_indicators에서 호출 (stoch_k 계산 후)
-indicators['stoch_d'] = self.calculate_stoch_d(self.stoch_k_history[stock_code])
-```
-
-### vol_ratio
-#### 재검토 결과
-제안 OK, 하지만 True Range / ATR(14)로 더 표준화 (검색 확인).
-
-#### 수정된 개선 코드 제안
-```python
-import numpy as np
-
-# data_processor.py에 vol_ratio 계산 메서드 추가 (history 필요)
-def calculate_vol_ratio(self, high, low, prev_close, atr_history, period=14):
-    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))  # True Range
-    if len(atr_history) < period:
-        return 1  # 초기값
-    atr = np.mean(atr_history[-period:])  # ATR (SMA for simplicity)
-    vol_ratio = tr / atr if atr != 0 else 1
-    return vol_ratio
-
-# calculate_indicators에서 호출
-indicators['vol_ratio'] = self.calculate_vol_ratio(current_high, current_low, prev_close, self.atr_history[stock_code])
-```
-
-### spread
-#### 재검토 결과
-Opt10005(TR) 대신 실시간 FID(41 ask1, 46 bid1) 사용이 더 적합 (실시간 프로젝트).
-
-#### 수정된 개선 코드 제안
-```python
-# kiwoom_client.py에 실시간 호가 등록 (init or connect 후)
-def register_real_hoga(self, stock_code):
-    self.kiwoom.SetRealReg("1000", stock_code, "41;46", "1")  # ask1, bid1 FID
-
-# OnReceiveRealData에 추가
-if fid == 41: self.ask1 = int(real_data)
-elif fid == 46: self.bid1 = int(real_data)
-
-# data_processor.py의 calculate_indicators에 추가
-indicators['spread'] = self.kiwoom_client.ask1 - self.kiwoom_client.bid1 if hasattr(self.kiwoom_client, 'ask1') else 0
-```
-이상 modify.md는 2025.08.27 14:30분경에 적용됨
+이제 명확한 구현 가이드가 완성되었습니다. VSCode Claude가 지적한 4개 문제만 수정하면 안정적으로 작동할 것입니다.

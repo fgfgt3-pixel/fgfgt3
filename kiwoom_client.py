@@ -17,7 +17,7 @@ from PyQt5.QAxContainer import QAxWidget
 from PyQt5.QtCore import QEventLoop, QTimer
 
 from config import (
-    TARGET_STOCKS, KiwoomConfig, DataConfig, RealDataFID, TRCode
+    TARGET_STOCKS, KiwoomConfig, DataConfig, RealDataFID, TRCode, OptimizedFID
 )
 
 class KiwoomClient:
@@ -245,31 +245,30 @@ class KiwoomClient:
             for idx, group in enumerate(screen_groups):
                 screen_no = f"{KiwoomConfig.SCREEN_NO_REALTIME}{idx:02d}"
                 
-                # 주식체결 등록
+                # CLAUDE.md 최적화된 FID 사용 - 단일 등록
                 stock_codes = ";".join(group)
-                self.logger.info(f"실시간 등록 상세: 화면={screen_no}, 종목={stock_codes}, FID={RealDataFID.QUOTE_FID_LIST}")
+                fid_list = OptimizedFID.get_fid_list()
+                
+                # 첫 종목만 "0" (신규 등록), 나머지는 "1" (추가 등록)
+                opt_type = "0" if idx == 0 else "1"
+                
+                self.logger.info(f"실시간 등록 (최적화): 화면={screen_no}, 종목={stock_codes}, FID={fid_list}, opt_type={opt_type}")
                 ret1 = self.ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    screen_no, stock_codes, RealDataFID.QUOTE_FID_LIST, "1"
+                    screen_no, stock_codes, fid_list, opt_type
                 )
-                self.logger.info(f"주식체결 등록 결과: {ret1}")
+                self.logger.info(f"실시간 등록 결과: {ret1}")
                 
-                # 주식호가 등록  
-                hoga_screen = f"{screen_no}_HOGA"
-                self.logger.info(f"호가 등록 상세: 화면={hoga_screen}, 종목={stock_codes}, FID={RealDataFID.HOGA_FID_LIST}")
-                ret2 = self.ocx.dynamicCall(
-                    "SetRealReg(QString, QString, QString, QString)",
-                    hoga_screen, stock_codes, RealDataFID.HOGA_FID_LIST, "1"
-                )
-                self.logger.info(f"주식호가 등록 결과: {ret2}")
+                # 안정성을 위한 짧은 대기
+                time.sleep(0.05)
                 
-                if ret1 == 0 and ret2 == 0:
+                if ret1 == 0:
                     self.screen_numbers[screen_no] = group
                     self.registered_stocks.update(group)
                     success_count += len(group)
                     self.logger.info(f"실시간 등록 성공: 화면 {screen_no}, 종목 {len(group)}개")
                 else:
-                    self.logger.error(f"실시간 등록 실패: 화면 {screen_no}, ret1={ret1}, ret2={ret2}")
+                    self.logger.error(f"실시간 등록 실패: 화면 {screen_no}, ret={ret1}")
             
             self.logger.info(f"전체 실시간 등록: {success_count}/{len(stocks)} 성공")
             return success_count == len(stocks)
@@ -676,3 +675,141 @@ if __name__ == "__main__":
             client.disconnect()
     else:
         print("[FAIL] 연결 실패")
+
+# ============================================================================
+# CLAUDE.md 수정사항 - 새로운 클래스들 추가
+# ============================================================================
+
+class SimpleTRManager:
+    """단순화된 TR 요청 관리 (QTimer 방식)"""
+    
+    def __init__(self, kiwoom_client):
+        self.kiwoom = kiwoom_client
+        self.last_opt10059 = {}  # 종목별 마지막 요청 시간만
+        self.timers = {}  # 종목별 QTimer 관리
+        self.logger = logging.getLogger(__name__)
+        
+    def can_request(self, stock_code):
+        """60초 제한 체크"""
+        if stock_code in self.last_opt10059:
+            if time.time() - self.last_opt10059[stock_code] < 60:
+                return False
+        return True
+    
+    def request_opt10059(self, stock_code):
+        """OPT10059 요청 (성공시에만 시간 기록)"""
+        if not self.can_request(stock_code):
+            return False
+        
+        try:
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "종목코드", stock_code)
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "기준일자", datetime.now().strftime("%Y%m%d"))
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1")
+            
+            req_name = f"opt10059_{stock_code}_{int(time.time())}"
+            result = self.kiwoom.ocx.dynamicCall("CommRqData(QString, QString, int, QString)", req_name, "opt10059", 0, "5959")
+            
+            if result == 0:
+                # 성공 후에만 시간 기록
+                self.last_opt10059[stock_code] = time.time()
+                self.logger.info(f"OPT10059 요청 성공: {stock_code}")
+                return True
+            else:
+                self.logger.error(f"OPT10059 요청 실패: {stock_code}, 코드: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"TR 실패: {e}")
+            return False
+    
+    def request_with_retry(self, stock_code):
+        """에러 시에도 Timer 체인 유지"""
+        try:
+            if self.can_request(stock_code):
+                self.request_opt10059(stock_code)
+        except Exception as e:
+            self.logger.error(f"TR 실패 {stock_code}: {e}")
+        finally:
+            # 에러 여부 관계없이 다음 타이머 예약
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(60000, 
+                lambda sc=stock_code: self.request_with_retry(sc))
+    
+    def schedule_next_request(self, stock_code):
+        """종목별 60초 타이머 시작"""
+        from PyQt5.QtCore import QTimer
+        
+        if stock_code in self.timers:
+            self.timers[stock_code].stop()
+            
+        timer = QTimer()
+        timer.timeout.connect(
+            lambda sc=stock_code: self.request_with_retry(sc))
+        timer.setSingleShot(True)
+        timer.start(60000)  # 60초
+        self.timers[stock_code] = timer
+    
+    def initialize_requests(self, stock_codes):
+        """프로그램 시작 시 즉시 TR 요청"""
+        from PyQt5.QtCore import QTimer
+        
+        for i, stock_code in enumerate(stock_codes):
+            # 동시 요청 방지를 위한 지연
+            QTimer.singleShot(i * 200, 
+                lambda sc=stock_code: self.request_opt10059(sc))
+            
+    def cleanup(self):
+        """종료 시 타이머 정리"""
+        for timer in self.timers.values():
+            timer.stop()
+
+
+class ConnectionMonitor:
+    """QTimer 기반 연결 상태 모니터링"""
+    
+    def __init__(self, kiwoom_client):
+        self.kiwoom = kiwoom_client
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.check_connection)
+        self.logger = logging.getLogger(__name__)
+        
+    def start_monitoring(self):
+        """모니터링 시작"""
+        self.monitor_timer.start(10000)  # 10초마다 체크
+        self.logger.info("연결 상태 모니터링 시작")
+        
+    def check_connection(self):
+        """연결 상태 체크"""
+        try:
+            state = self.kiwoom.ocx.dynamicCall("GetConnectState()")
+            
+            if state == 0:  # 연결 끊김
+                self.logger.warning("연결 끊김 감지! 재연결 시도...")
+                self.kiwoom.ocx.dynamicCall("CommTerminate()")
+                
+                # 재로그인
+                result = self.kiwoom.ocx.dynamicCall("CommConnect()")
+                if result == 0:
+                    self.logger.info("재연결 성공")
+                    # 실시간 재등록
+                    self.re_register_all()
+                else:
+                    self.logger.error(f"재연결 실패: {result}")
+                    
+        except Exception as e:
+            self.logger.error(f"연결 상태 체크 오류: {e}")
+                
+    def re_register_all(self):
+        """실시간 데이터 재등록"""
+        try:
+            if hasattr(self.kiwoom, 'register_realdata'):
+                self.kiwoom.register_realdata()
+                self.logger.info("실시간 데이터 재등록 완료")
+        except Exception as e:
+            self.logger.error(f"실시간 데이터 재등록 실패: {e}")
+                
+    def stop_monitoring(self):
+        """모니터링 중지"""
+        if self.monitor_timer:
+            self.monitor_timer.stop()
+            self.logger.info("연결 상태 모니터링 중지")
