@@ -32,603 +32,109 @@
 
 ## 3. 기술 사양
 
-### 3.1 config.py (설정 관리) - 수정된 사항
-```python
-# 종목 코드 중앙 관리
-TARGET_STOCKS = ['005930']  # 초기 1개, 최대 20개까지 점진 증가
-
-# Open API 설정
-SCREEN_NO_BASE = 1000  # 실시간용 화면번호 시작
-TR_SCREEN_NO_BASE = 5000  # TR용 화면번호 시작
-ACCOUNT_NO = "계좌번호"
-
-# 데이터 설정
-MAX_TICK_BUFFER = 1000
-CSV_DIR = "pure_websocket_data"
-
-# CSV 배치 설정 (선택 가능)
-CSV_BATCH_SIZE = 10  # 절충안 (1=즉시저장, 100=배치저장)
-
-# FID 설정 (테스트 후 선택)
-# 체결 중심: FID 27(최우선매도호가), 28(최우선매수호가)
-# 호가 중심: FID 41(매도호가1), 51(매수호가1)
-USE_ORDER_BOOK_FID = "27;28"  # 기본값: 체결 중심
-
-# TR 제한 (단순화)
-TR_INTERVAL_SECONDS = 60  # 동일 TR 60초 제한
-```
+### 3.1 config.py (설정 관리)
+config.py는 클래스 기반 구조(KiwoomConfig, DataConfig, OptimizedFID 등)로 구현되어 있으며, TARGET_STOCKS, FID 매핑, CSV 설정 등을 중앙 관리합니다. 실제 구현은 해당 파일을 참조하세요.
 
 ### 3.2 Open API 연결 및 실시간 등록
 
-#### 실시간 데이터 등록 (SetRealReg)
-```python
-def register_real_data(self, stock_codes):
-    # 최적화된 FID 리스트 (필수 데이터만)
-    # 키움 OpenAPI 공식 가이드:
-    # - FID 10: 현재가, 13: 거래량
-    # - FID 27: 최우선매도호가, 28: 최우선매수호가 (체결 중심)
-    # - FID 41: 매도호가1, 51: 매수호가1 (호가 잔량 중심)
-    fid_list = "10;11;12;13;14;15;20;27;28"  # 체결 중심 (권장)
-    # 또는 fid_list = "10;11;12;13;14;15;20;41;51" # 호가 잔량 중심
-    
-    for idx, code in enumerate(stock_codes):
-        screen_no = f"{1000 + idx}"  # 종목별 화면번호 분리
-        opt_type = "0" if idx == 0 else "1"  # 첫 종목만 신규, 나머지는 추가
-        
-        self.SetRealReg(screen_no, code, fid_list, opt_type)
-        time.sleep(0.05)  # 안정성
-```
+#### 실시간 데이터 등록
+KiwoomClient.register_realdata() 메서드가 구현되어 있으며, OptimizedFID 클래스의 FID 설정을 사용합니다.
 
 #### 연결 상태 모니터링
-```python
-from PyQt5.QtCore import QTimer
-
-class ConnectionMonitor:
-    def __init__(self, kiwoom):
-        self.kiwoom = kiwoom
-        self.monitor_timer = QTimer()
-        self.monitor_timer.timeout.connect(self.check_connection)
-        
-    def start_monitoring(self):
-        self.monitor_timer.start(10000)  # 10초마다 체크
-        
-    def check_connection(self):
-        state = self.kiwoom.GetConnectState()
-        
-        if state == 0:  # 연결 끊김
-            print("연결 끊김 감지! 재연결 시도...")
-            self.kiwoom.CommTerminate()
-            
-            # 재로그인
-            if self.kiwoom.CommConnect() == 0:
-                # 실시간 재등록
-                self.re_register_all()
-                
-    def stop_monitoring(self):
-        if self.monitor_timer:
-            self.monitor_timer.stop()
-```
+ConnectionMonitor 클래스가 구현되어 있으며, 10초마다 연결 상태를 체크하고 자동 재연결/재등록을 처리합니다.
 
 ### 3.3 이벤트 핸들러
 
-#### OnReceiveRealData 구현
-```python
-def OnReceiveRealData(self, sCode, sRealType, sRealData):
-    """실시간 데이터 수신 이벤트"""
-    
-    # 실시간 타입별 처리 분기 (필수)
-    if sRealType == "주식체결":
-        # 체결 데이터 처리 - 실제 틱
-        current_price = self.parse_real_data(sCode, 10)
-        volume = self.parse_real_data(sCode, 15)
-        
-        # 36개 지표 계산
-        tick_data = self.calculate_indicators(sCode, current_price, volume)
-        
-        # CSV 저장 (체결 시에만)
-        self.csv_writer.add_tick(tick_data)
-        
-    elif sRealType == "주식호가잔량":
-        # 호가 데이터 처리 - 메모리만 업데이트
-        self.update_orderbook(sCode)
-        # CSV 저장하지 않음
-        
-    elif sRealType == "주식시세":
-        # 종합 시세 처리
-        pass
-
-def parse_real_data(self, sCode, fid):
-    """실시간 데이터 파싱 with 안전 처리"""
-    raw_data = self.GetCommRealData(sCode, fid)
-    
-    # 공백/None 체크
-    if not raw_data or raw_data.strip() == "":
-        return 0
-    
-    # 부호 처리 및 타입 변환
-    try:
-        cleaned = raw_data.strip().replace(",", "")
-        value = abs(int(cleaned)) if cleaned else 0
-        
-        # 이상치 체크
-        if fid == 10 and value > 10000000:  # 현재가 천만원 초과시
-            logging.warning(f"Abnormal price: {value}")
-            
-        return value
-    except (ValueError, TypeError):
-        logging.error(f"Parse error: {raw_data}")
-        return 0
-```
+#### 실시간 데이터 처리
+KiwoomClient.on_receive_real_data() 메서드가 실시간 데이터를 수신하고, DataProcessor에서 sRealType별 분기 처리 및 지표 계산을 수행합니다.
 
 ### 3.4 36개 지표 정의 ('수급 지표'는 11개 컬럼 확장 저장으로 총 44개 CSV컬럼)
-- 기본 데이터 (5개): time, stock_code, current_price, volume
+- 기본 데이터 (4개): time, stock_code, current_price, volume
 - 가격 지표 (5개): ma5, rsi14, disparity, stoch_k, stoch_d
 - 볼륨 지표 (3개): vol_ratio, z_vol, obv_delta
 - Bid/Ask 지표 (2개): spread, bid_ask_imbalance
 - 기타 지표 (2개): accel_delta, ret_1s
 - 호가 가격 (10개): ask1~ask5, bid1~bid5
-- 호가 잔량 (10개): ask1_qty~ask5_qty, bid1_qty~bid5_qty
+- 호가 잔량 (6개): ask1_qty~ask3_qty, bid1_qty~bid3_qty
 - 수급 통합 지표: 개인, 외인, 기관, 연기금, 투신, 보험, 사모펀드, 은행, 국가, 기타법인, 프로그램 (11개 개별 컬럼)
+- 수급 총합 (1개): total_investor_net
 
 ## 4. 수급 통합 지표 (OPT10059) 관리
 
 ### 4.1 InvestorNetManager 클래스
-```python
-class InvestorNetManager:
-    """수급 데이터 관리 - 단순하고 명확한 구조"""
-    
-    def __init__(self, stock_codes):
-        self.stock_codes = stock_codes
-        
-        # 종목별 현재 수급 데이터 (TR에서 받은 최신 누적값)
-        self.current_net_vol = defaultdict(lambda: self._get_empty_dict())
-        
-        # 종목별 이전 수급 데이터 (delta 계산용)
-        self.previous_net_vol = defaultdict(lambda: self._get_empty_dict())
-        
-        # 종목별 마지막 업데이트 정보
-        self.last_update_info = defaultdict(lambda: {
-            'time': None,
-            'round': 0
-        })
-        
-        # TR 스케줄 관리
-        self.tr_schedule = PriorityQueue()
-        self._initialize_schedule()
-        
-    def _get_empty_dict(self):
-        """빈 수급 딕셔너리 반환"""
-        return {
-            'individual': 0,      # 개인
-            'foreign': 0,         # 외인
-            'institution': 0,     # 기관
-            'pension': 0,         # 연기금
-            'investment': 0,      # 투신
-            'insurance': 0,       # 보험
-            'private_fund': 0,    # 사모펀드
-            'bank': 0,           # 은행
-            'state': 0,          # 국가
-            'other_corp': 0,     # 기타법인
-            'program': 0         # 프로그램
-        }
-    
-    def update_from_tr(self, stock_code, tr_data):
-        """TR 응답 처리 - 누적값을 그대로 저장 (대체)"""
-        
-        # 1. 이전값 백업 (delta 계산용)
-        self.previous_net_vol[stock_code] = self.current_net_vol[stock_code].copy()
-        
-        # 2. 새로운 누적값으로 대체 (키움이 주는 값이 이미 누적값)
-        self.current_net_vol[stock_code] = {
-            'individual': int(tr_data.get('개인', 0)),
-            'foreign': int(tr_data.get('외인', 0)),
-            'institution': int(tr_data.get('기관', 0)),
-            'pension': int(tr_data.get('연기금', 0)),
-            'investment': int(tr_data.get('투신', 0)),
-            'insurance': int(tr_data.get('보험', 0)),
-            'private_fund': int(tr_data.get('사모펀드', 0)),
-            'bank': int(tr_data.get('은행', 0)),
-            'state': int(tr_data.get('국가', 0)),
-            'other_corp': int(tr_data.get('기타법인', 0)),
-            'program': int(tr_data.get('프로그램', 0))
-        }
-        
-        # 3. 다음 TR 스케줄링 (1분 후)
-        next_time = time.time() + 60
-        next_round = self.last_update_info[stock_code]['round'] + 1
-        self.tr_schedule.put((next_time, stock_code, next_round))
-```
+data_processor.py에 구현되어 있으며, 11개 수급 지표의 현재값/이전값 관리, TR 응답 데이터 파싱, Delta 계산을 담당합니다.
 
-### 4.2 TR 요청 제한 관리 (단순화)
-```python
-# TR 요청 제한: 동일 TR코드 + 동일 조건 = 60초 1회 (불변사항)
-from PyQt5.QtCore import QTimer
-import time
-import logging
+### 4.2 TR 요청 제한 관리
+SimpleTRManager 클래스가 kiwoom_client.py에 구현되어 있으며, 60초 TR 제한, QTimer 기반 스케줄링, 에러 시 타이머 체인 유지 기능을 제공합니다.
 
-class SimpleTRManager:
-    """단순화된 TR 요청 관리"""
-    
-    def __init__(self, kiwoom_client):
-        self.kiwoom = kiwoom_client
-        self.last_opt10059 = {}  # 종목별 마지막 요청 시간만
-        self.timers = {}  # 종목별 QTimer 관리
-        
-    def can_request(self, stock_code):
-        """60초 제한 체크"""
-        if stock_code in self.last_opt10059:
-            if time.time() - self.last_opt10059[stock_code] < 60:
-                return False
-        return True
-    
-    def request_opt10059(self, stock_code):
-        """OPT10059 요청 (성공시에만 시간 기록)"""
-        if not self.can_request(stock_code):
-            return False
-        
-        try:
-            self.kiwoom.SetInputValue("종목코드", stock_code)
-            self.kiwoom.SetInputValue("기준일자", datetime.now().strftime("%Y%m%d"))
-            self.kiwoom.SetInputValue("수정주가구분", "1")
-            
-            req_name = f"opt10059_{stock_code}_{int(time.time())}"
-            self.kiwoom.CommRqData(req_name, "opt10059", 0, "5959")
-            
-            # 성공 후에만 시간 기록
-            self.last_opt10059[stock_code] = time.time()
-            return True
-        except Exception as e:
-            logging.error(f"TR 실패: {e}")
-            return False
-    
-    def request_with_retry(self, stock_code):
-        """에러 시에도 Timer 체인 유지"""
-        try:
-            if self.can_request(stock_code):
-                self.request_opt10059(stock_code)
-        except Exception as e:
-            logging.error(f"TR 실패 {stock_code}: {e}")
-        finally:
-            # 에러 여부 관계없이 다음 타이머 예약
-            QTimer.singleShot(60000, 
-                lambda sc=stock_code: self.request_with_retry(sc))
-    
-    def schedule_next_request(self, stock_code):
-        """종목별 60초 타이머 시작"""
-        if stock_code in self.timers:
-            self.timers[stock_code].stop()
-            
-        timer = QTimer()
-        timer.timeout.connect(
-            lambda sc=stock_code: self.request_with_retry(sc))
-        timer.setSingleShot(True)
-        timer.start(60000)  # 60초
-        self.timers[stock_code] = timer
-    
-    def initialize_requests(self, stock_codes):
-        """프로그램 시작 시 즉시 TR 요청"""
-        for i, stock_code in enumerate(stock_codes):
-            # 동시 요청 방지를 위한 지연
-            QTimer.singleShot(i * 200, 
-                lambda sc=stock_code: self.request_opt10059(sc))
-            
-    def cleanup(self):
-        """종료 시 타이머 정리"""
-        for timer in self.timers.values():
-            timer.stop()
+## 5. 구현된 주요 클래스들
 
+### 5.1 메인 애플리케이션
+- **KiwoomDataCollector** (main.py): 전체 시스템 통합 관리, 모든 모듈 초기화 및 콜백 연결
 
-## 5. 데이터 처리 및 저장
+### 5.2 키움 API 클라이언트
+- **KiwoomClient** (kiwoom_client.py): 키움 OpenAPI+ OCX 컨트롤 관리, 실시간 데이터 등록/수신
+- **SimpleTRManager** (kiwoom_client.py): TR 요청 60초 제한 관리, QTimer 방식
+- **ConnectionMonitor** (kiwoom_client.py): 연결 상태 모니터링 및 자동 재연결
 
-### 5.1 틱 데이터 처리
-```python
-class TickProcessor:
-    """틱 데이터 처리 및 CSV 저장"""
-    
-    def __init__(self, investor_manager):
-        self.investor_manager = investor_manager
-        self.buffer = deque(maxlen=10000)  # 백프레셔 처리
-        
-    def process_tick(self, stock_code, real_time_data):
-        """틱 발생 시 데이터 처리"""
-        
-        # 1. 기본 틱 데이터
-        tick_data = {
-            'timestamp': datetime.now().isoformat(),
-            'stock_code': stock_code,
-            'current_price': real_time_data.get('current_price', 0),
-            'volume': real_time_data.get('volume', 0),
-            # ... 기타 실시간 지표
-        }
-        
-        # 2. 수급 데이터 추가
-        investor_data = self.investor_manager.get_data_for_tick(stock_code)
-        
-        # 개별 컬럼으로 저장
-        for key, value in investor_data['net_vol'].items():
-            tick_data[f'net_{key}'] = value
-            
-        # Delta 추가
-        if investor_data['delta']:
-            for key, value in investor_data['delta'].items():
-                tick_data[f'delta_{key}'] = value
-        else:
-            for key in investor_data['net_vol'].keys():
-                tick_data[f'delta_{key}'] = 0
-                
-        return tick_data
-```
+### 5.3 데이터 처리
+- **IndicatorCalculator** (data_processor.py): 36개 지표 실시간 계산
+- **DataProcessor** (data_processor.py): 실시간 데이터 파싱 및 지표 통합
+- **InvestorNetManager** (data_processor.py): 11개 수급 지표 관리
 
-### 5.2 CSV 배치 저장
-```python
-class CSVWriter:
-    """CSV 배치 저장으로 I/O 최적화"""
-    
-    def __init__(self):
-        self.batch = []
-        self.batch_size = 100
-        self.write_lock = Lock()
-        
-    def add_tick(self, tick_data):
-        """틱 데이터 추가"""
-        self.batch.append(tick_data)
-        if len(self.batch) >= self.batch_size:
-            self.flush()
-    
-    def flush(self):
-        """배치 쓰기"""
-        with self.write_lock:
-            if not self.batch:
-                return
-                
-            filename = f"{tick_data['stock_code']}_36indicators_realtime_{datetime.now().strftime('%Y%m%d')}.csv"
-            filepath = os.path.join("pure_websocket_data", filename)
-            
-            # 디렉토리 생성
-            os.makedirs("pure_websocket_data", exist_ok=True)
-            
-            # CSV 쓰기
-            file_exists = os.path.exists(filepath)
-            with open(filepath, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=self.get_columns())
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerows(self.batch)
-            
-            self.batch.clear()
-```
+### 5.4 CSV 저장
+- **BatchCSVWriter** (csv_writer.py): 설정 가능한 배치 저장, 44개 컬럼 CSV 파일 생성
 
-### 5.3 종목별 상태 관리
-```python
-from dataclasses import dataclass
+### 5.5 보안 및 유틸리티
+- **SecureLoginHelper** (secure_helper.py): 암호화된 자동 로그인 관리
 
-@dataclass
-class StockState:
-    """종목별 상태 관리"""
-    code: str
-    screen_no: str
-    price_buffer: deque
-    volume_buffer: deque
-    last_tick_time: datetime
-    investor_net_vol: dict
-    orderbook: dict  # 호가 정보
-    indicators: dict  # 계산된 지표
-    
-class StockManager:
-    def __init__(self):
-        self.stocks: Dict[str, StockState] = {}
-        
-    def initialize_stock(self, stock_code):
-        """종목 초기화"""
-        self.stocks[stock_code] = StockState(
-            code=stock_code,
-            screen_no=f"{1000 + len(self.stocks)}",
-            price_buffer=deque(maxlen=1000),
-            volume_buffer=deque(maxlen=1000),
-            last_tick_time=datetime.now(),
-            investor_net_vol={},
-            orderbook={},
-            indicators={}
-        )
-```
+## 6. 주요 설정 및 제한사항
 
-## 6. 초기 데이터 로드
-```python
-async def initialize_stock_data(self, stock_code):
-    """종목별 초기 데이터 로드 (전일 고가 등)"""
-    # OPT10001로 기본 정보 로드
-    self.SetInputValue("종목코드", stock_code)
-    self.CommRqData(f"주식기본정보_{stock_code}", "OPT10001", 0, "2000")
-    
-    # 응답 대기 후 prev_day_high 등 저장
-    await self.wait_for_tr_data()
-```
+### 6.1 기술적 제한사항 (불변)
+- **32비트 Python 3.8** 환경 필수 (키움 OpenAPI+ 의존)
+- **Windows 환경** 필수
+- **QTimer 사용** (PyQt5 이벤트 루프 호환, async 금지)
+- **TR 제한**: 동일 TR 60초 1회 제한
 
-## 7. 에러 처리 및 복구
+### 6.2 데이터 처리 원칙 (불변)
+- **틱 정의**: 체결 발생 시점만 (가격/거래량 변동시)
+- **CSV 저장**: 체결 이벤트만 저장, 호가는 메모리만 업데이트
+- **종목별 독립**: 각 종목별 독립적 상태 관리
+- **배치 저장**: I/O 최적화를 위한 배치 저장 방식
 
-### 7.1 에러 복구 메커니즘
-```python
-class ErrorRecovery:
-    def __init__(self):
-        self.error_count = defaultdict(int)
-        self.last_error = defaultdict(lambda: None)
-        
-    async def handle_error(self, stock_code, error):
-        self.error_count[stock_code] += 1
-        
-        if self.error_count[stock_code] > 5:
-            # 재등록 시도
-            await self.re_register_stock(stock_code)
-            self.error_count[stock_code] = 0
-```
+### 6.3 보안 관리
+- **자동 로그인**: 암호화된 인증 정보 관리
+- **메모리 보안**: 사용 후 즉시 삭제
+- **환경 변수**: 민감 정보는 환경 변수 활용
 
-### 7.2 디버깅 도구
-```python
-class DebugChecker:
-    """문제 진단용 체커"""
-    
-    def check_fid_registration(self):
-        """FID 등록 확인"""
-        print("✓ FID 리스트 완전성 체크")
-        print("✓ SetRealReg opt_type='0' 확인")
-        
-    def check_data_flow(self):
-        """데이터 흐름 확인"""
-        print("✓ OnReceiveRealData 호출 빈도")
-        print("✓ sRealType별 분기 처리")
-        print("✓ GetCommRealData 반환값 파싱")
-        
-    def check_tr_timing(self):
-        """TR 타이밍 확인"""
-        print("✓ OPT10059 1분 간격 준수")
-        print("✓ 종목별 독립 타이머")
-```
+## 7. 개발 및 운영 가이드라인
 
-## 8. 메인 실행 로직 (단순화)
-```python
-from PyQt5.QtCore import QTimer
+### 7.1 코드 작성 원칙
+- 기존 파일 우선 활용, 신규 파일 최소화
+- 실제 구현된 클래스와 메서드 참조
+- GitHub pykiwoom 예제 참고 가능 (직접 복사 금지)
+- 출처 주석 명시, 재구현 원칙
 
-class RealtimeCollector:
-    """실시간 수집 메인 클래스 (QTimer 방식)"""
-    
-    def __init__(self, config):
-        self.stock_codes = config.TARGET_STOCKS
-        self.investor_manager = InvestorNetManager(self.stock_codes)
-        self.tr_manager = SimpleTRManager(kiwoom_client)
-        self.tick_processor = TickProcessor(self.investor_manager)
-        self.csv_writer = CSVWriter()
-        self.connection_monitor = ConnectionMonitor(kiwoom_client)
-        
-    def run(self):
-        """메인 실행 (동기 방식)"""
-        # 연결 상태 모니터링 시작
-        self.connection_monitor.start_monitoring()
-        
-        # 실시간 데이터 등록
-        self.register_real_data(self.stock_codes)
-        
-        # 초기 수급 데이터 즉시 TR 요청
-        self.tr_manager.initialize_requests(self.stock_codes)
-        
-        # 종목별 60초 타이머 시작
-        for stock_code in self.stock_codes:
-            self.tr_manager.schedule_next_request(stock_code)
-            
-    def cleanup(self):
-        """종료 시 리소스 정리"""
-        self.connection_monitor.stop_monitoring()
-        self.tr_manager.cleanup()
-```
+### 7.2 테스트 방법
+- 단일 종목부터 점진적 증가 (1개 → 20개)
+- 실시간 환경에서 실제 데이터 검증
+- 로그 파일을 통한 상세 모니터링
 
-## 9. 프로젝트 구조 (수정된 구조)
-
-### 1. **기존 구조 최대한 활용:**
-
-```python
-# data_processor.py에 추가
-class InvestorNetManager:
-    # 수급 데이터 관리 (SimpleTRManager와 분리)
-    
-# kiwoom_client.py에 추가  
-class SimpleTRManager:
-    # 단순화된 TR 관리 (QTimer 방식)
-    
-class ConnectionMonitor:
-    # QTimer 기반 연결 상태 모니터링
-```
-
-### 2. **기존 파일 개선:**
-- `csv_writer.py` - 배치 크기 설정 가능 (1~100)
-- `config.py` - FID 선택 옵션, CSV 배치 설정 추가
-- `main.py` - QTimer 방식으로 전환, async 제거
-
-### 3. **새로운 개선 사항:**
-- **FID 최적화**: 27/28(체결) vs 41/51(호가) 선택적 사용
-- **람다 클로저 안전성**: 변수 캐처 시 기본값 지정
-- **에러 시 TR 시간 기록 안함**: 성공 후에만 기록
-- **QTimer 참조 유지**: 클래스 멤버로 관리
-
-```python
-# 예시: data_processor.py
-class DataProcessor:
-    def __init__(self):
-        self.investor_manager = InvestorNetManager()  # 추가
-        # 기존 RSI, Disparity 등 계산 개선 적용
-```
-
-## 10. 개발 순서 (수정된 순서)
-
-1. **config.py 업데이트**
-   - 최적화된 FID 리스트 상수 추가 (27/28 또는 41/51)
-   - CSV 배치 크기 설정 (즉시/배치 선택 가능)
-   - 화면번호 베이스 설정
-
-2. **kiwoom_client.py 개선**
-   - register_real_data() 수정 (필수 FID만, opt_type 조건부 설정)
-   - OnReceiveRealData에 sRealType 분기 추가
-   - SimpleTRManager 클래스 추가 (단순화된 TR 관리)
-   - ConnectionMonitor 클래스 추가 (QTimer 방식)
-
-3. **data_processor.py 확장**
-   - parse_real_data() 안전 처리 강화
-   - InvestorNetManager 클래스 추가 (수급 데이터 관리)
-   - 지표 계산 개선 (RSI, Disparity, Stoch, vol_ratio)
-
-4. **csv_writer.py 최적화**
-   - 설정 가능한 배치 저장 (1~100)
-   - flush() 메서드 구현
-   - 스레드 안전성 확보
-
-5. **main.py 통합 (단순화)**
-   - QTimer 기반 동기 방식으로 전환
-   - 새 클래스들 임포트/초기화
-   - 초기 수급 데이터 즉시 로드
-
-6. **테스트 및 적용**
-   - FID 번호 실제 테스트로 확인 (27/28 vs 41/51)
-   - 람다 클로저 문제 수정 테스트
-   - QTimer 체인 정상 작동 확인
-
-
-## 11. 테스트 방법
-- 단일 종목: TARGET_STOCKS = ['005930']
-- 다중 종목: 1개 → 20개 점진 증가
-- 대량 종목: 20개 이상으로 안정성 테스트
-
-## 12. 주의사항 (수정된 사항)
-- **로그인 정보 보안**: 환경 변수 관리
-- **틱 정의 준수**: 체결 이벤트만 틱으로 처리, CSV 저장
-- **FID 선택적 등록**: 필수 FID만 (27/28 또는 41/51) 성능 우선
-- **sRealType 체크**: 이벤트 타입별 분기 처리
-- **데이터 파싱**: abs(int()) 처리 및 이상치 체크
-- **화면번호 분리**: 종목별 독립 화면번호
-- **SetRealReg opt_type**: 첫 종목 "0", 나머지 "1" (안정성 향상)
-- **TR 제한**: 60초 동일 TR 제한만 (단순화)
-- **QTimer 사용**: PyQt5 이벤트 루프 호환성 (async 금지)
-- **람다 클로저**: 변수 캐처 시 기본값 지정 필수
-- **CSV 배치 저장**: 설정 가능 (1~100), 즉시 저장 옵션
-- **Windows/32비트 환경**: Python 3.8 32비트 필수
-
-## 13. 로그 관리
-- logging 모듈 사용
-- 레벨: INFO(일반), WARNING(재시도), ERROR(실패)
+### 7.3 로그 관리
+- logging 모듈 활용
+- INFO(일반), WARNING(재시도), ERROR(실패) 레벨 구분
 - logs/ 디렉토리에 날짜별 파일 저장
-- 실시간 이벤트 빈도 및 에러 추적
 
-## 14. 최종 구현 확정 사항
-```markdown
-## 구현 확정 사항 (최종)
-1. QTimer 사용 (PyQt5 이벤트 루프)
-2. FID: 테스트 후 27/28(체결중심) 또는 41/51(호가중심) 선택
-3. 람다에서 변수 캐처 시 기본값 지정 필수
-4. TR 성공 후에만 시간 기록
-5. Timer 객체는 클래스 멤버로 관리
-6. opt_type: 첫 종목 "0", 나머지 "1"
-7. CSV 배치 크기 설정 가능 (1~100)
-```
+## 8. 최종 확정 구현 사항
 
-## 15. 코드 작성 참고
-- GitHub pykiwoom 예제 참고 가능
-- 키움증권 OpenAPI 공식 샘플 참고
-- 참고 시 출처 주석 명시
-- 직접 복사 금지, 재구현 원칙
+1. **QTimer 기반**: PyQt5 이벤트 루프 호환성
+2. **FID 최적화**: 체결/호가 선택적 사용
+3. **람다 클로저**: 변수 캐처 시 기본값 지정 필수
+4. **TR 관리**: 성공 후에만 시간 기록
+5. **객체 관리**: Timer 객체는 클래스 멤버로 관리
+6. **실시간 등록**: 첫 종목 "0", 나머지 "1"
+7. **CSV 설정**: 배치 크기 1~100 설정 가능
+
+---
+
+**참고**: 모든 상세 구현은 실제 .py 파일들을 참조하세요. 이 문서는 프로젝트의 전략적 방향과 핵심 원칙을 제시하며, 구체적인 코드 구현은 각 파일에서 확인할 수 있습니다.

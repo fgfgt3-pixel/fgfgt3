@@ -97,11 +97,38 @@
 **원인**: 비상모드 잔여 로직 또는 호가 이벤트 가상 데이터
 **해결**: 재시작 후 체결 이벤트만 CSV 저장하도록 수정됨
 
+#### 5. 수급 지표 키 매핑 불일치 문제 해결 ✅
+**문제**: 11개 수급 지표가 여전히 0.0으로 표시되는 근본 원인 발견
+
+**원인 분석**:
+- `parse_investor_data()` 반환 키: `'indiv_net'`, `'foreign_net'`, `'inst_net'` 등
+- `InvestorNetManager.update_from_tr()` 기대 키: `'개인'`, `'외인'`, `'기관'` 등  
+- 키 이름 완전 불일치로 모든 수급 데이터가 0으로 처리됨
+
+**수정 내용**:
+- `data_processor.py` Line 712-724: InvestorNetManager 키 매핑 수정
+  ```python
+  'individual': int(tr_data.get('indiv_net', 0)),      # parse_investor_data 키 맞춤
+  'foreign': int(tr_data.get('foreign_net', 0)),       # parse_investor_data 키 맞춤
+  'institution': int(tr_data.get('inst_net', 0)),      # parse_investor_data 키 맞춤
+  ```
+- `kiwoom_client.py` Line 949: SimpleTRManager screen_to_stock 매핑 오류 수정
+  ```python
+  self.kiwoom.screen_to_stock[screen_no] = stock_code  # 올바른 객체 참조
+  ```
+
+#### 6. 수급 지표 디버깅 로그 강화 ✅
+**추가 내용**:
+- `data_processor.py` Line 730-741: 수급 데이터 상세 로깅 추가
+- 개인/외인/기관별 실제 수급량 표시
+- 0이 아닌 값 발견 시 "🎉 수급데이터발견" 강조 표시
+- 모든 값이 0일 시 "⚠️ 수급데이터문제" 경고 표시
+
 ### 🔄 다음 작업 권장사항
-1. 프로그램 재시작 후 로그 확인
-2. 수급 TR(OPT10059) 실제 응답 데이터 검증
-3. Volume 데이터가 실제 누적거래량으로 정상 수신되는지 확인
-4. 전체 44개 지표 최종 검증
+1. ✅ 수급 지표 키 매핑 불일치 문제 해결 완료
+2. 프로그램 재시작 후 수급 데이터 실제 파싱 확인
+3. OPT10059 TR 요청 시 raw 데이터 로깅 검증
+4. 전체 44개 지표 최종 검증 (수급 11개 포함)
 
 ---
 

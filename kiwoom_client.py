@@ -149,7 +149,7 @@ class KiwoomClient:
             return False
     
     def auto_login(self) -> bool:
-        """🔒 자동 로그인 실행"""
+        """🔒 자동 로그인 실행 (SendKeys 사용)"""
         if not self.auto_login_enabled or not self.secure_login_helper:
             return False
             
@@ -161,24 +161,129 @@ class KiwoomClient:
         user_id, password, cert_password = credentials
         
         try:
-            # 키움 로그인 다이얼로그에 자동 입력 (시뮬레이션)
+            import time
+            import win32api
+            import win32con
+            import win32gui
+            
             self.logger.info("🔒 자동 로그인 실행 중...")
             
-            # 실제 구현은 키움 API 특성상 제한적
-            # 사용자가 직접 로그인 창에서 입력해야 함
+            # 로그인 창 찾기 (최대 15초 대기, 더 긴 시간)
+            login_window = None
+            for i in range(15):
+                try:
+                    # 키움 로그인 창 찾기
+                    def enum_windows_callback(hwnd, windows):
+                        if win32gui.IsWindowVisible(hwnd):
+                            window_text = win32gui.GetWindowText(hwnd)
+                            class_name = win32gui.GetClassName(hwnd)
+                            
+                            # 디버깅: 모든 창 제목 출력 (INFO 레벨로 강제 출력)
+                            if i == 0 and window_text:  # 첫 번째 루프에서만
+                                if "키움" in window_text or "영웅문" in window_text or "khopen" in window_text.lower():
+                                    self.logger.info(f"[창 발견] Window: {window_text}, Class: {class_name}")
+                            
+                            # 키움 로그인 창 패턴들 (더 많은 패턴 추가)
+                            login_patterns = [
+                                "Open API Login",
+                                "영웅문",
+                                "KHOPENAPI",
+                                "로그인",
+                                "Login",
+                                "키움증권",
+                                "KHOpenAPI",
+                                "영웅문S",
+                                "영웅문4",
+                                "영웅문HTS",
+                                "인증"
+                            ]
+                            
+                            for pattern in login_patterns:
+                                if pattern.lower() in window_text.lower():
+                                    windows.append((hwnd, window_text))
+                                    self.logger.info(f"로그인 창 후보 발견: {window_text}")
+                                    break
+                                    
+                            # 클래스 이름으로도 체크
+                            if "khopenapi" in class_name.lower() or "#32770" in class_name:
+                                if hwnd not in [w[0] for w in windows]:
+                                    windows.append((hwnd, window_text))
+                                    self.logger.info(f"클래스명으로 발견: {window_text} ({class_name})")
+                                    
+                        return True
+                    
+                    windows = []
+                    win32gui.EnumWindows(enum_windows_callback, windows)
+                    
+                    if windows:
+                        login_window, window_title = windows[0]
+                        self.logger.info(f"로그인 창 발견: {window_title}")
+                        break
+                except:
+                    pass
+                time.sleep(1)
             
-            self.logger.info(f"💡 사용자 정보: {user_id[:3]}***")
-            self.logger.info("💡 비밀번호 정보: 로드 완료")
-            
-            # 메모리에서 즉시 삭제
-            user_id = password = cert_password = None
-            del user_id, password, cert_password
-            
-            return True
+            if login_window:
+                try:
+                    # 창을 앞으로 가져오기
+                    win32gui.SetForegroundWindow(login_window)
+                    time.sleep(0.5)
+                    
+                    # SendKeys 방식으로 입력
+                    import win32com.client
+                    shell = win32com.client.Dispatch("WScript.Shell")
+                    
+                    # 아이디 입력
+                    shell.SendKeys(user_id)
+                    time.sleep(0.3)
+                    
+                    # 탭키로 비밀번호 필드로 이동
+                    shell.SendKeys("{TAB}")
+                    time.sleep(0.3)
+                    
+                    # 비밀번호 입력
+                    shell.SendKeys(password)
+                    time.sleep(0.3)
+                    
+                    # 탭키로 공인인증서 비밀번호 필드로 이동
+                    shell.SendKeys("{TAB}")
+                    time.sleep(0.3)
+                    
+                    # 공인인증서 비밀번호 입력
+                    shell.SendKeys(cert_password)
+                    time.sleep(0.3)
+                    
+                    # 엔터키로 로그인
+                    shell.SendKeys("{ENTER}")
+                    
+                    self.logger.info("자동 입력 완료 - 로그인 처리 중...")
+                    
+                    # 메모리에서 즉시 삭제
+                    user_id = password = cert_password = None
+                    del user_id, password, cert_password
+                    
+                    return True
+                except Exception as e:
+                    self.logger.error(f"자동 입력 실패: {e}")
+            else:
+                self.logger.warning("로그인 창을 찾을 수 없음")
+                self.logger.info(f"💡 수동 로그인 필요: ID={user_id[:3]}***")
+                self.logger.info("💡 로그인 창이 열리면 수동으로 입력해주세요")
+                
+        except ImportError as e:
+            self.logger.warning(f"필요한 모듈이 없음: {e}")
+            self.logger.info(f"💡 수동 로그인 필요: ID={user_id[:3]}***")
             
         except Exception as e:
             self.logger.error(f"자동 로그인 실패: {e}")
-            return False
+            
+        finally:
+            # 메모리 정리
+            if 'user_id' in locals():
+                user_id = password = cert_password = None
+                del user_id, password, cert_password
+            
+        return False
     
     def connect(self) -> bool:
         """키움 서버 연결"""
@@ -211,6 +316,11 @@ class KiwoomClient:
             # CommConnect 호출
             ret = self.ocx.dynamicCall("CommConnect()")
             if ret == 0:
+                # 자동 로그인 시도 (2초 후) - 로그인 창이 뜨는 시간 대기
+                if self.auto_login_enabled:
+                    self.logger.info("🔑 2초 후 자동 로그인 시도 예정...")
+                    QTimer.singleShot(2000, self.auto_login)
+                
                 # 타임아웃 설정 (30초)
                 QTimer.singleShot(30000, self.login_timeout)
                 self.login_event_loop.exec_()
@@ -836,7 +946,7 @@ class SimpleTRManager:
             self.logger.info(f"📊 [OPT10059] 입력 파라미터: 종목={stock_code}, 일자={today}, 금액수량구분=1(수량), 매매구분=0(순매수), 단위구분=1(천주)")
             
             screen_no = "5959"
-            self.screen_to_stock[screen_no] = stock_code  # screen_no -> stock_code 매핑 설정
+            self.kiwoom.screen_to_stock[screen_no] = stock_code  # screen_no -> stock_code 매핑 설정
             
             req_name = f"OPT10059_{stock_code}_{int(time.time())}"
             result = self.kiwoom.ocx.dynamicCall("CommRqData(QString, QString, int, QString)", req_name, "OPT10059", 0, screen_no)

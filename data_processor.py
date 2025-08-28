@@ -708,26 +708,37 @@ class InvestorNetManager:
         # 1. 이전값 백업 (delta 계산용)
         self.previous_net_vol[stock_code] = self.current_net_vol[stock_code].copy()
         
-        # 2. 새로운 누적값으로 대체 (키움이 주는 값이 이미 누적값)
+        # 2. 새로운 누적값으로 대체 (parse_investor_data의 키 이름으로 수정)
         self.current_net_vol[stock_code] = {
-            'individual': int(tr_data.get('개인', 0)),
-            'foreign': int(tr_data.get('외인', 0)),
-            'institution': int(tr_data.get('기관', 0)),
-            'pension': int(tr_data.get('연기금', 0)),
-            'investment': int(tr_data.get('투신', 0)),
-            'insurance': int(tr_data.get('보험', 0)),
-            'private_fund': int(tr_data.get('사모펀드', 0)),
-            'bank': int(tr_data.get('은행', 0)),
-            'state': int(tr_data.get('국가', 0)),
-            'other_corp': int(tr_data.get('기타법인', 0)),
-            'program': int(tr_data.get('프로그램', 0))
+            'individual': int(tr_data.get('indiv_net', 0)),      # parse_investor_data 키 맞춤
+            'foreign': int(tr_data.get('foreign_net', 0)),       # parse_investor_data 키 맞춤
+            'institution': int(tr_data.get('inst_net', 0)),      # parse_investor_data 키 맞춤
+            'pension': int(tr_data.get('pension_net', 0)),       # parse_investor_data 키 맞춤
+            'investment': int(tr_data.get('trust_net', 0)),      # parse_investor_data 키 맞춤
+            'insurance': int(tr_data.get('insurance_net', 0)),   # parse_investor_data 키 맞춤
+            'private_fund': int(tr_data.get('private_fund_net', 0)), # parse_investor_data 키 맞춤
+            'bank': int(tr_data.get('bank_net', 0)),            # parse_investor_data 키 맞춤
+            'state': int(tr_data.get('state_net', 0)),          # parse_investor_data 키 맞춤
+            'other_corp': int(tr_data.get('other_net', 0)),     # parse_investor_data 키 맞춤
+            'program': int(tr_data.get('prog_net', 0))          # parse_investor_data 키 맞춤
         }
         
         # 3. 업데이트 시간 기록
         self.last_update_info[stock_code]['time'] = time.time()
         self.last_update_info[stock_code]['round'] += 1
         
-        self.logger.info(f"수급 데이터 업데이트: {stock_code}, Round {self.last_update_info[stock_code]['round']}")
+        # 상세 로깅 추가
+        total_vol = sum(self.current_net_vol[stock_code].values())
+        self.logger.info(f"💰 [수급업데이트완료] {stock_code} Round#{self.last_update_info[stock_code]['round']}")
+        self.logger.info(f"    └─ 개인:{self.current_net_vol[stock_code]['individual']:,}, 외인:{self.current_net_vol[stock_code]['foreign']:,}, 기관:{self.current_net_vol[stock_code]['institution']:,}")
+        self.logger.info(f"    └─ 총계:{total_vol:,}")
+        
+        # 0이 아닌 값이 있는지 확인
+        non_zero_count = sum(1 for v in self.current_net_vol[stock_code].values() if v != 0)
+        if non_zero_count > 0:
+            self.logger.info(f"🎉 [수급데이터발견] {non_zero_count}개 항목에서 0이 아닌 값 확인!")
+        else:
+            self.logger.warning(f"⚠️ [수급데이터문제] 모든 수급 값이 0입니다. TR 데이터 확인 필요")
     
     def get_data_for_tick(self, stock_code):
         """틱마다 현재 저장된 값 반환"""
