@@ -109,6 +109,10 @@ class CSVWriter:
         """33개 지표를 CSV에 저장"""
         try:
             self.logger.debug(f"쓰기 시도: {stock_code}, 데이터 키: {list(indicators.keys())[:5]}...")
+            
+            # 지표 데이터를 그대로 사용 (data_processor에서 이미 호가 병합 완료)
+            corrected_indicators = indicators
+            
             # CSV가 초기화되지 않은 경우 초기화
             if stock_code not in self.csv_writers:
                 if not self.initialize_stock_csv(stock_code):
@@ -116,7 +120,7 @@ class CSVWriter:
             
             with self.file_locks[stock_code]:
                 # 데이터 검증 및 정제
-                clean_indicators = self._clean_indicators(indicators)
+                clean_indicators = self._clean_indicators(corrected_indicators)
                 
                 # CSV 행 작성
                 self.csv_writers[stock_code].writerow(clean_indicators)

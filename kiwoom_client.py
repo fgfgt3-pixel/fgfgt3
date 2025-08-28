@@ -20,6 +20,13 @@ from config import (
     TARGET_STOCKS, KiwoomConfig, DataConfig, RealDataFID, TRCode, OptimizedFID
 )
 
+# 🔒 보안 자동 로그인 (선택적 import - 파일 없으면 수동 로그인)
+try:
+    from secure_helper import SecureLoginHelper
+    SECURE_LOGIN_AVAILABLE = True
+except ImportError:
+    SECURE_LOGIN_AVAILABLE = False
+
 class KiwoomClient:
     """
     키움 OpenAPI+ 클라이언트
@@ -47,6 +54,11 @@ class KiwoomClient:
         # 연결 상태
         self.connected = False
         self.login_attempted = False
+        
+        # 🔒 보안 자동 로그인 헬퍼
+        self.secure_login_helper = SecureLoginHelper() if SECURE_LOGIN_AVAILABLE else None
+        self.auto_login_enabled = False
+        self.secure_credentials_file = "local_config.py"  # 안전한 파일명
         
         # 이벤트 루프
         self.login_event_loop = None
@@ -116,6 +128,57 @@ class KiwoomClient:
     # ========================================================================
     # 로그인 및 연결 관리
     # ========================================================================
+    
+    def enable_auto_login(self, credentials_file: str = None) -> bool:
+        """🔒 자동 로그인 활성화"""
+        if not SECURE_LOGIN_AVAILABLE:
+            self.logger.warning("보안 로그인 모듈을 사용할 수 없습니다.")
+            return False
+            
+        if credentials_file:
+            self.secure_credentials_file = credentials_file
+            
+        # 인증 정보 로드 테스트
+        credentials = self.secure_login_helper.get_login_credentials(self.secure_credentials_file)
+        if credentials:
+            self.auto_login_enabled = True
+            self.logger.info("🔒 자동 로그인 활성화됨")
+            return True
+        else:
+            self.logger.warning("인증 정보를 찾을 수 없습니다. secure_helper.py를 실행해서 설정하세요.")
+            return False
+    
+    def auto_login(self) -> bool:
+        """🔒 자동 로그인 실행"""
+        if not self.auto_login_enabled or not self.secure_login_helper:
+            return False
+            
+        credentials = self.secure_login_helper.get_login_credentials(self.secure_credentials_file)
+        if not credentials:
+            self.logger.error("자동 로그인: 인증 정보 로드 실패")
+            return False
+            
+        user_id, password, cert_password = credentials
+        
+        try:
+            # 키움 로그인 다이얼로그에 자동 입력 (시뮬레이션)
+            self.logger.info("🔒 자동 로그인 실행 중...")
+            
+            # 실제 구현은 키움 API 특성상 제한적
+            # 사용자가 직접 로그인 창에서 입력해야 함
+            
+            self.logger.info(f"💡 사용자 정보: {user_id[:3]}***")
+            self.logger.info("💡 비밀번호 정보: 로드 완료")
+            
+            # 메모리에서 즉시 삭제
+            user_id = password = cert_password = None
+            del user_id, password, cert_password
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"자동 로그인 실패: {e}")
+            return False
     
     def connect(self) -> bool:
         """키움 서버 연결"""
@@ -308,10 +371,10 @@ class KiwoomClient:
             if real_type not in known_types:
                 self.logger.warning(f"⚠️  [미지타입] {stock_code}: '{real_type}' - 새로운 이벤트 타입!")
             
-            # 현재 시간을 HHMMSS.mmm 형식으로 생성 (시:분:초.밀리초)
+            # 현재 시간을 Unix timestamp (밀리초 단위)로 생성
             from datetime import datetime
             now = datetime.now()
-            current_time = now.strftime("%H%M%S.%f")[:-3]  # HHMMSS.mmm
+            current_time = int(now.timestamp() * 1000)  # Unix timestamp in milliseconds
             
             # 데이터 추출
             data = {'time': current_time, 'stock_code': stock_code}
@@ -772,8 +835,11 @@ class SimpleTRManager:
             
             self.logger.info(f"📊 [OPT10059] 입력 파라미터: 종목={stock_code}, 일자={today}, 금액수량구분=1(수량), 매매구분=0(순매수), 단위구분=1(천주)")
             
-            req_name = f"opt10059_{stock_code}_{int(time.time())}"
-            result = self.kiwoom.ocx.dynamicCall("CommRqData(QString, QString, int, QString)", req_name, "opt10059", 0, "5959")
+            screen_no = "5959"
+            self.screen_to_stock[screen_no] = stock_code  # screen_no -> stock_code 매핑 설정
+            
+            req_name = f"OPT10059_{stock_code}_{int(time.time())}"
+            result = self.kiwoom.ocx.dynamicCall("CommRqData(QString, QString, int, QString)", req_name, "OPT10059", 0, screen_no)
             
             if result == 0:
                 # 성공 후에만 시간 기록

@@ -36,3 +36,19 @@ nul
 
 # Claude 설정
 .claude/
+
+# 🔒 개인 인증 정보 파일들 - 절대 유출 금지
+local_config.py
+personal_config.py
+my_credentials.py
+auth_info.py
+login_info.py
+user_credentials.py
+*.key
+*.secret
+*.cred
+*.auth
+*_credentials.*
+*_password.*
+*_auth.*
+*_login.*

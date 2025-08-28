@@ -73,16 +73,8 @@ class IndicatorCalculator:
             Dict: 계산된 33개 지표
         """
         try:
-            # time 데이터 타입 안전하게 처리
-            time_value = tick_data.get('time', int(time.time() * 1000))
-            if isinstance(time_value, str):
-                # "120205.762" 형태의 문자열을 밀리초 단위로 변환
-                try:
-                    current_time = int(float(time_value) * 1000)
-                except (ValueError, TypeError):
-                    current_time = int(time.time() * 1000)
-            else:
-                current_time = int(time_value) if time_value else int(time.time() * 1000)
+            # Unix timestamp (밀리초)로 시간 처리 - kiwoom_client에서 이미 변환됨
+            current_time = int(tick_data.get('time', int(time.time() * 1000)))
             
             # kiwoom_client에서 이미 숫자로 변환된 값을 받음
             current_price = float(tick_data.get('current_price', 0))
@@ -106,6 +98,9 @@ class IndicatorCalculator:
             bid_ask_data = self._extract_bid_ask_data(tick_data)
             if bid_ask_data:
                 self.bid_ask_buffer.append(bid_ask_data)
+                # ✅ modify2.md 근본 문제 해결: 추출된 호가 데이터를 tick_data에 병합
+                tick_data.update(bid_ask_data)
+                self.logger.debug(f"🔗 [호가병합] {self.stock_code}: ask1={bid_ask_data.get('ask1', 0)}, bid1={bid_ask_data.get('bid1', 0)}")
             
             # 33개 지표 계산
             indicators = self._calculate_all_indicators(tick_data)
@@ -129,12 +124,12 @@ class IndicatorCalculator:
         """호가 데이터 추출"""
         bid_ask = {}
         
-        # 호가 가격 및 잔량 추출
+        # 호가 가격 및 잔량 추출 (키 이름 수정: kiwoom_client에서 ask1, bid1으로 저장)
         for i in range(1, 6):
-            ask_price_key = f'ask{i}_price'
-            ask_qty_key = f'ask{i}_qty'
-            bid_price_key = f'bid{i}_price'
-            bid_qty_key = f'bid{i}_qty'
+            ask_price_key = f'ask{i}'        # ask1_price → ask1
+            ask_qty_key = f'ask{i}_qty'     # 변경 없음
+            bid_price_key = f'bid{i}'       # bid1_price → bid1  
+            bid_qty_key = f'bid{i}_qty'     # 변경 없음
             
             # kiwoom_client에서 이미 숫자로 변환된 값을 받음
             bid_ask[f'ask{i}'] = float(tick_data.get(ask_price_key, 0))
@@ -150,15 +145,8 @@ class IndicatorCalculator:
     
     def _calculate_all_indicators(self, tick_data: Dict) -> Dict:
         """33개 지표 전체 계산"""
-        # time 데이터 타입 안전하게 처리 (update_tick_data와 동일한 로직)
-        time_value = tick_data.get('time', int(time.time() * 1000))
-        if isinstance(time_value, str):
-            try:
-                current_time = int(float(time_value) * 1000)
-            except (ValueError, TypeError):
-                current_time = int(time.time() * 1000)
-        else:
-            current_time = int(time_value) if time_value else int(time.time() * 1000)
+        # Unix timestamp (밀리초)로 시간 처리 - kiwoom_client에서 이미 변환됨
+        current_time = int(tick_data.get('time', int(time.time() * 1000)))
         
         # kiwoom_client에서 이미 숫자로 변환된 값을 받음
         current_price = float(tick_data.get('current_price', 0))
@@ -193,8 +181,8 @@ class IndicatorCalculator:
         # ====================================================================
         # 4. Bid/Ask 지표 (2개)
         # ====================================================================
-        indicators['spread'] = self._calculate_spread()
-        indicators['bid_ask_imbalance'] = self._calculate_bid_ask_imbalance()
+        indicators['spread'] = self._calculate_spread(tick_data)
+        indicators['bid_ask_imbalance'] = self._calculate_bid_ask_imbalance(tick_data)
         
         # ====================================================================
         # 5. 기타 지표 (2개)
@@ -203,22 +191,25 @@ class IndicatorCalculator:
         indicators['ret_1s'] = self._calculate_ret_1s(current_time, current_price)
         
         # ====================================================================
-        # 6. 호가 가격 (10개)
+        # 6. 호가 가격 (10개) - modify2.md 수정: tick_data에서 직접 추출
         # ====================================================================
-        bid_ask_data = self.bid_ask_buffer[-1] if self.bid_ask_buffer else {}
+        # bid_ask_buffer 대신 tick_data에서 직접 가져옴 (병합된 데이터 사용)
         for i in range(1, 6):
-            indicators[f'ask{i}'] = bid_ask_data.get(f'ask{i}', 0)
-            indicators[f'bid{i}'] = bid_ask_data.get(f'bid{i}', 0)
+            ask_value = float(tick_data.get(f'ask{i}', 0))
+            bid_value = float(tick_data.get(f'bid{i}', 0))
+            indicators[f'ask{i}'] = ask_value
+            indicators[f'bid{i}'] = bid_value
+            
+            # 🔍 호가 디버깅 (첫 5틱만)
+            if len(self.price_buffer) <= 5:
+                self.logger.info(f"🎯 [지표계산] {self.stock_code}: ask{i}={ask_value}, bid{i}={bid_value} (tick_data에서 추출)")
         
         # ====================================================================
-        # 7. 호가 잔량 (6개) - 33개 맞추기 위해 조정
+        # 7. 호가 잔량 (10개) - modify2.md 수정: tick_data에서 직접 추출, 전체 10개 포함
         # ====================================================================
-        indicators['ask1_qty'] = bid_ask_data.get('ask1_qty', 0)
-        indicators['ask2_qty'] = bid_ask_data.get('ask2_qty', 0)
-        indicators['ask3_qty'] = bid_ask_data.get('ask3_qty', 0)
-        indicators['bid1_qty'] = bid_ask_data.get('bid1_qty', 0)
-        indicators['bid2_qty'] = bid_ask_data.get('bid2_qty', 0)
-        indicators['bid3_qty'] = bid_ask_data.get('bid3_qty', 0)
+        for i in range(1, 6):
+            indicators[f'ask{i}_qty'] = int(tick_data.get(f'ask{i}_qty', 0))
+            indicators[f'bid{i}_qty'] = int(tick_data.get(f'bid{i}_qty', 0))
         
         # ====================================================================
         # 8. 수급 통합 지표 (11개) - CLAUDE.md 요구사항: 개별 컬럼으로 저장
@@ -391,15 +382,12 @@ class IndicatorCalculator:
     # Bid/Ask 지표 계산 함수들
     # ========================================================================
     
-    def _calculate_spread(self) -> float:
-        """스프레드 (ask1 - bid1) - 실시간 호가 데이터 사용"""
+    def _calculate_spread(self, tick_data: Dict) -> float:
+        """스프레드 (ask1 - bid1) - tick_data에서 직접 계산"""
         try:
-            if not self.kiwoom_client:
-                return 0.0
-            
-            # kiwoom_client의 실시간 호가 데이터 사용
-            ask1_price = self.kiwoom_client.ask1.get(self.stock_code, 0)
-            bid1_price = self.kiwoom_client.bid1.get(self.stock_code, 0)
+            # tick_data에서 직접 호가 가격 추출
+            ask1_price = float(tick_data.get('ask1', 0))
+            bid1_price = float(tick_data.get('bid1', 0))
             
             if ask1_price > 0 and bid1_price > 0:
                 spread = ask1_price - bid1_price
@@ -411,20 +399,29 @@ class IndicatorCalculator:
             self.logger.error(f"spread 계산 실패: {e}")
             return 0.0
     
-    def _calculate_bid_ask_imbalance(self) -> float:
-        """호가 불균형 (bid_qty - ask_qty) / total"""
-        if not self.bid_ask_buffer:
+    def _calculate_bid_ask_imbalance(self, tick_data: Dict) -> float:
+        """호가 불균형 (bid_qty - ask_qty) / total - tick_data에서 직접 계산"""
+        try:
+            # tick_data에서 직접 호가잔량 추출
+            total_bid = 0
+            total_ask = 0
+            
+            for i in range(1, 6):
+                bid_qty = int(tick_data.get(f'bid{i}_qty', 0))
+                ask_qty = int(tick_data.get(f'ask{i}_qty', 0))
+                total_bid += bid_qty
+                total_ask += ask_qty
+            
+            total = total_bid + total_ask
+            if total == 0:
+                return 0.0
+            
+            imbalance = (total_bid - total_ask) / total
+            return float(imbalance)
+            
+        except Exception as e:
+            self.logger.error(f"bid_ask_imbalance 계산 실패: {e}")
             return 0.0
-        
-        latest_hoga = self.bid_ask_buffer[-1]
-        total_bid = latest_hoga.get('total_bid_qty', 0)
-        total_ask = latest_hoga.get('total_ask_qty', 0)
-        total = total_bid + total_ask
-        
-        if total == 0:
-            return 0.0
-        
-        return float((total_bid - total_ask) / total)
     
     # ========================================================================
     # 기타 지표 계산 함수들
@@ -465,28 +462,21 @@ class IndicatorCalculator:
     
     def _calculate_investor_individual_indicators(self) -> dict:
         """수급 지표 11개 개별 계산 (CLAUDE.md 요구사항: 개별 컬럼으로 저장)"""
-        from config import IndicatorConfig
-        
         investor_indicators = {}
         
-        # 투자주체별 순매수량을 개별 컬럼으로 저장
-        field_mapping = {
-            'indiv_net_vol': 'indiv_net',
-            'foreign_net_vol': 'foreign_net', 
-            'inst_net_vol': 'inst_net',
-            'pension_net_vol': 'pension_net',
-            'trust_net_vol': 'trust_net',
-            'insurance_net_vol': 'insurance_net',
-            'private_fund_net_vol': 'private_fund_net',
-            'bank_net_vol': 'bank_net',
-            'state_net_vol': 'state_net',
-            'other_net_vol': 'other_net',
-            'prog_net_vol': 'prog_net'
-        }
+        # CSV 컬럼명과 매핑 (modify2.md 수정: 실제 CSV 헤더와 일치)
+        investor_columns = [
+            'indiv_net_vol', 'foreign_net_vol', 'inst_net_vol', 'pension_net_vol', 
+            'trust_net_vol', 'insurance_net_vol', 'private_fund_net_vol', 
+            'bank_net_vol', 'state_net_vol', 'other_net_vol', 'prog_net_vol'
+        ]
         
-        # 각 투자주체별 데이터 추출
-        for csv_column, data_key in field_mapping.items():
-            investor_indicators[csv_column] = float(self.investor_net_data.get(data_key, 0))
+        # 각 수급 지표를 0으로 초기화 (TR 데이터가 없을 때)
+        for column in investor_columns:
+            investor_indicators[column] = 0.0
+        
+        # 실제 수급 데이터가 있으면 업데이트 (추후 TR 연동시)
+        # TODO: OPT10059 TR 데이터 연동 필요
         
         return investor_indicators
     
@@ -553,80 +543,45 @@ class DataProcessor:
             return None
         
         try:
-            # modify.md 방안 1: 데이터 병합 로직 추가
+            # CLAUDE.md 규칙: 체결 이벤트만 CSV 저장, 호가 이벤트는 메모리만 업데이트
             if real_type in ["주식호가", "주식호가잔량"]:
-                # 호가 데이터를 메모리에 저장 (CSV 저장 안함)
-                self.latest_orderbook[stock_code] = {
-                    'ask1': tick_data.get('ask1', 0),
-                    'ask2': tick_data.get('ask2', 0), 
-                    'ask3': tick_data.get('ask3', 0),
-                    'ask4': tick_data.get('ask4', 0),
-                    'ask5': tick_data.get('ask5', 0),
-                    'bid1': tick_data.get('bid1', 0),
-                    'bid2': tick_data.get('bid2', 0),
-                    'bid3': tick_data.get('bid3', 0),
-                    'bid4': tick_data.get('bid4', 0),
-                    'bid5': tick_data.get('bid5', 0),
-                    'ask1_qty': tick_data.get('ask1_qty', 0),
-                    'ask2_qty': tick_data.get('ask2_qty', 0),
-                    'ask3_qty': tick_data.get('ask3_qty', 0),
-                    'ask4_qty': tick_data.get('ask4_qty', 0),
-                    'ask5_qty': tick_data.get('ask5_qty', 0),
-                    'bid1_qty': tick_data.get('bid1_qty', 0),
-                    'bid2_qty': tick_data.get('bid2_qty', 0),
-                    'bid3_qty': tick_data.get('bid3_qty', 0),
-                    'bid4_qty': tick_data.get('bid4_qty', 0),
-                    'bid5_qty': tick_data.get('bid5_qty', 0),
-                    'timestamp': time.time()
-                }
-                
-                self.logger.info(f"🏦 [호가저장] {stock_code}: ask1={tick_data.get('ask1', 0)}, bid1={tick_data.get('bid1', 0)}")
-                return None  # 호가 이벤트는 CSV 저장하지 않음
-                
-            elif real_type in ["주식체결"]:
-                # 체결 데이터와 최신 호가 병합
-                merged_data = tick_data.copy()
-                
-                # 최신 호가 데이터 병합 - 상세 디버깅
-                if stock_code in self.latest_orderbook:
-                    orderbook_data = self.latest_orderbook[stock_code]
-                    self.logger.info(f"🔗 [병합전] {stock_code}: 저장된 ask1={orderbook_data.get('ask1', 'None')}, bid1={orderbook_data.get('bid1', 'None')}")
-                    
-                    merged_data.update(orderbook_data)
-                    
-                    # 병합 결과 확인
-                    self.logger.info(f"🔗 [병합후] {stock_code}: 병합된 ask1={merged_data.get('ask1', 'None')}, bid1={merged_data.get('bid1', 'None')}")
-                    self.logger.info(f"🔗 [데이터병합] {stock_code}: 체결+호가 병합 완료")
-                else:
-                    # 호가 데이터가 없으면 0으로 초기화
-                    orderbook_fields = ['ask1','ask2','ask3','ask4','ask5',
-                                      'bid1','bid2','bid3','bid4','bid5',
-                                      'ask1_qty','ask2_qty','ask3_qty','ask4_qty','ask5_qty',
-                                      'bid1_qty','bid2_qty','bid3_qty','bid4_qty','bid5_qty']
-                    for field in orderbook_fields:
-                        merged_data[field] = 0
-                    self.logger.warning(f"⚠️ [호가없음] {stock_code}: latest_orderbook에 데이터 없음, 0으로 초기화")
-                    self.logger.warning(f"⚠️ [저장소상태] latest_orderbook 종목목록: {list(self.latest_orderbook.keys())}")
-                
-                # 병합된 데이터로 지표 계산
-                indicators = self.calculators[stock_code].update_tick_data(merged_data)
-                
-                # 디버깅 로그 (처음 5틱만)
-                if len(self.calculators[stock_code].price_buffer) <= 5:
-                    self.logger.info(f"📊 [지표계산] {stock_code}: 지표개수={len(indicators) if indicators else 0}")
-                
-                if indicators and self.indicator_callback:
-                    self.indicator_callback(stock_code, indicators)
-                elif not indicators:
-                    if len(self.calculators[stock_code].price_buffer) <= 5:
-                        self.logger.warning(f"❌ [지표없음] {stock_code}: 빈 지표 반환됨")
-                elif not self.indicator_callback:
-                    self.logger.warning(f"❌ [콜백없음] 콜백이 None입니다!")
-                
-                return indicators
+                # 호가 이벤트: 메모리만 업데이트, CSV 저장 안함
+                self.logger.debug(f"📊 [호가업데이트] {stock_code}: {real_type} - 메모리만 갱신")
+                self._update_orderbook_only(stock_code, tick_data)
+                return None  # CSV 저장하지 않음
+            
+            elif real_type == "주식체결":
+                # 체결 이벤트: CSV 저장
+                self.logger.info(f"💾 [체결저장] {stock_code}: {real_type} - CSV 저장")
+                if tick_data.get('current_price', 0) == 0:
+                    self.logger.warning(f"⚠️ [체결누락] {stock_code}: 체결가 없음")
+                    return None
             else:
-                self.logger.warning(f"🔍 [미지원타입] {real_type}: 처리하지 않음")
-                return None
+                # 기타 이벤트 로그
+                self.logger.debug(f"📡 [기타이벤트] {stock_code}: {real_type}")
+            
+            # 모든 데이터를 저장소에 업데이트
+            if stock_code not in self.latest_orderbook:
+                self.latest_orderbook[stock_code] = {}
+            
+            # 현재 틱 데이터를 저장소에 병합
+            self.latest_orderbook[stock_code].update(tick_data)
+            self.latest_orderbook[stock_code]['timestamp'] = time.time()
+            
+            # 최종 데이터로 지표 계산 (저장소의 모든 데이터 사용)
+            final_data = self.latest_orderbook[stock_code].copy()
+            
+            # 디버깅 로그 (처음 5번만)
+            if len(self.calculators[stock_code].price_buffer) < 5:
+                self.logger.info(f"🚨 [최종데이터] {stock_code}: ask1={final_data.get('ask1', 0)}, bid1={final_data.get('bid1', 0)}, 가격={final_data.get('current_price', 0)}")
+            
+            # 지표 계산 및 CSV 저장
+            indicators = self.calculators[stock_code].update_tick_data(final_data)
+            
+            if indicators and self.indicator_callback:
+                self.indicator_callback(stock_code, indicators)
+            
+            return indicators
             
         except Exception as e:
             self.logger.error(f"❌ 실시간 데이터 처리 오류 ({stock_code}): {e}")
@@ -670,6 +625,17 @@ class DataProcessor:
             status['calculators'][stock_code] = calc.get_buffer_status()
         
         return status
+    
+    def _update_orderbook_only(self, stock_code: str, tick_data: Dict):
+        """호가 이벤트 전용: 메모리만 업데이트, CSV 저장 안함"""
+        if stock_code not in self.latest_orderbook:
+            self.latest_orderbook[stock_code] = {}
+        
+        # 호가 데이터를 저장소에 업데이트
+        self.latest_orderbook[stock_code].update(tick_data)
+        self.latest_orderbook[stock_code]['timestamp'] = time.time()
+        
+        self.logger.debug(f"호가 저장소 업데이트 완료: {stock_code}")
 
 if __name__ == "__main__":
     # 테스트
