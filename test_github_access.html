@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GitHub Repository Test</title>
+</head>
+<body>
+    <h1>GitHub Repository Access Test</h1>
+    
+    <h2>Public Repository URLs to Test:</h2>
+    <ul>
+        <li><a href="https://github.com/fgfgt3-pixel/fgfgt3" target="_blank">Repository Page</a></li>
+        <li><a href="https://raw.githubusercontent.com/fgfgt3-pixel/fgfgt3/main/README.md" target="_blank">README (Raw)</a></li>
+        <li><a href="https://raw.githubusercontent.com/fgfgt3-pixel/fgfgt3/main/main.py" target="_blank">main.py (Raw)</a></li>
+        <li><a href="https://api.github.com/repos/fgfgt3-pixel/fgfgt3" target="_blank">API JSON</a></li>
+    </ul>
+    
+    <h2>Test Results:</h2>
+    <script>
+        // Test each URL
+        const urls = [
+            'https://api.github.com/repos/fgfgt3-pixel/fgfgt3',
+            'https://raw.githubusercontent.com/fgfgt3-pixel/fgfgt3/main/README.md'
+        ];
+        
+        urls.forEach(url => {
+            fetch(url)
+                .then(response => {
+                    console.log(url + ' - Status: ' + response.status);
+                    document.write('<p>' + url + ' - Status: ' + response.status + '</p>');
+                })
+                .catch(error => {
+                    console.error(url + ' - Error: ' + error);
+                    document.write('<p>' + url + ' - Error: ' + error + '</p>');
+                });
+        });
+    </script>
+</body>
+</html>

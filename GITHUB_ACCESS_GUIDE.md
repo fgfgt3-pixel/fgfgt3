@@ -8,9 +8,10 @@
 
 ## 🔗 GitHub 저장소 정보
 - **저장소 URL**: https://github.com/fgfgt3-pixel/fgfgt3
-- **접근 상태**: Public (공개)
+- **접근 상태**: Public (공개) - API로 확인됨
 - **브랜치**: main
 - **생성일**: 2025년 8월 26일
+- **주의**: 다른 AI가 접근 못할 경우 아래 대체 방법 사용
 
 ## ✅ 다른 AI가 코드를 읽을 수 있게 하는 방법
 
@@ -65,6 +66,23 @@ git add .
 git commit -m "변경 내용 설명"
 git push
 ```
+
+## 🚨 다른 AI가 접근 못하는 문제 해결 방법
+
+### 직접 코드 제공 방법 (GitHub 접근 실패시)
+다른 AI가 GitHub URL로 접근하지 못한다면, 직접 코드를 복사해서 제공하세요:
+
+1. **전체 파일 내용 복사**
+   - VS Code나 메모장으로 파일 열기
+   - 전체 선택 (Ctrl+A) 후 복사 (Ctrl+C)
+   - AI 대화창에 붙여넣기
+
+2. **주요 파일 목록**
+   - main.py - 메인 실행 파일
+   - kiwoom_client.py - API 클라이언트
+   - data_processor.py - 데이터 처리
+   - config.py - 설정 파일
+   - CLAUDE.md - 프로젝트 가이드
 
 ## 🔍 문제 해결
 
