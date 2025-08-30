@@ -143,5 +143,263 @@ logs/
 - **파일 권한**: logs/, pure_websocket_data/ 자동 생성
 
 ---
-**업데이트**: 2025-08-30 Grok 접근 복원용
+
+## 📚 핵심 Python 코드 (Grok 읽기용)
+
+### 1. main.py - 메인 실행 파일
+```python
+"""
+키움 OpenAPI+ 실시간 데이터 수집 시스템 메인 실행
+"""
+import sys
+import time
+import signal
+import logging
+from datetime import datetime
+from typing import Dict, Any
+from PyQt5.QtCore import QTimer
+
+from config import TARGET_STOCKS, KiwoomConfig, DataConfig, TRCode
+from kiwoom_client import KiwoomClient, SimpleTRManager, ConnectionMonitor
+from data_processor import DataProcessor, InvestorNetManager
+from csv_writer import BatchCSVWriter
+
+class KiwoomDataCollector:
+    """키움 OpenAPI+ 실시간 데이터 수집 시스템 메인 클래스"""
+    
+    def __init__(self, target_stocks: list = None):
+        self.target_stocks = target_stocks or TARGET_STOCKS
+        self.running = False
+        
+        # 모듈 초기화
+        self.kiwoom_client = None
+        self.data_processor = None
+        self.csv_writer = None
+        self.tr_manager = None
+        self.connection_monitor = None
+        self.investor_manager = None
+    
+    def initialize_modules(self) -> bool:
+        """모든 모듈 초기화"""
+        # 1. 키움 클라이언트
+        self.kiwoom_client = KiwoomClient()
+        
+        # 2. QTimer 기반 관리자들
+        self.tr_manager = SimpleTRManager(self.kiwoom_client)
+        self.connection_monitor = ConnectionMonitor(self.kiwoom_client)
+        self.investor_manager = InvestorNetManager(self.target_stocks)
+        
+        # 3. 데이터 프로세서
+        self.data_processor = DataProcessor(self.target_stocks, self.kiwoom_client)
+        
+        # 4. CSV 저장소
+        self.csv_writer = BatchCSVWriter(self.target_stocks)
+        
+        return True
+    
+    def connect_callbacks(self):
+        """콜백 연결"""
+        # 실시간 데이터 콜백
+        self.kiwoom_client.register_callback(
+            'on_receive_real_data', 
+            self.on_realtime_data
+        )
+        
+        # TR 데이터 콜백
+        self.kiwoom_client.register_callback(
+            'on_receive_tr_data',
+            self.on_tr_data
+        )
+    
+    def start(self):
+        """시스템 시작"""
+        if not self.kiwoom_client.connect():
+            return False
+            
+        # 실시간 데이터 등록
+        self.kiwoom_client.register_realdata(self.target_stocks)
+        
+        # 연결 모니터링 시작
+        self.connection_monitor.start()
+        
+        # 수급 데이터 업데이트 시작
+        self.setup_investor_update()
+        
+        self.running = True
+        return True
+```
+
+### 2. kiwoom_client.py - 키움 API 클라이언트
+```python
+"""
+키움 OpenAPI+ 클라이언트
+"""
+from PyQt5.QAxContainer import QAxWidget
+from PyQt5.QtCore import QTimer, pyqtSignal, QObject
+import time
+import logging
+
+class KiwoomClient(QObject):
+    """키움 OpenAPI+ OCX 컨트롤 관리"""
+    
+    def __init__(self):
+        super().__init__()
+        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
+        self.connected = False
+        self.callbacks = {}
+        
+        # 이벤트 연결
+        self.ocx.OnEventConnect.connect(self._on_event_connect)
+        self.ocx.OnReceiveRealData.connect(self._on_receive_real_data)
+        self.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
+    
+    def connect(self) -> bool:
+        """키움 서버 연결"""
+        err = self.ocx.dynamicCall("CommConnect()")
+        if err != 0:
+            return False
+        
+        # 로그인 대기
+        self.login_event_loop = QEventLoop()
+        self.login_event_loop.exec_()
+        
+        return self.connected
+    
+    def register_realdata(self, stocks: list) -> bool:
+        """실시간 데이터 등록"""
+        SCREEN_BASE_TRADE = "5000"  # 체결용
+        SCREEN_BASE_HOGA = "6000"   # 호가용
+        
+        for idx, stock_code in enumerate(stocks):
+            # 기존 등록 제거
+            self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", stock_code)
+            time.sleep(0.05)
+            
+            # 체결 데이터 등록
+            screen_trade = f"{SCREEN_BASE_TRADE}{idx:02d}"
+            ret = self.ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                screen_trade,
+                stock_code,
+                "10;11;12;13;14;15;16;17;18;20",  # 체결 FID
+                "0" if idx == 0 else "1"
+            )
+            
+            # 호가 데이터 등록
+            screen_hoga = f"{SCREEN_BASE_HOGA}{idx:02d}"
+            ret = self.ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                screen_hoga,
+                stock_code,
+                "41;42;43;44;45;51;52;53;54;55",  # 호가 FID
+                "1"
+            )
+        
+        return True
+    
+    def _on_receive_real_data(self, sCode, sRealType, sRealData):
+        """실시간 데이터 수신"""
+        if sRealType == "주식체결":
+            data = self._parse_trade_data(sCode, sRealData)
+        elif sRealType in ["주식호가잔량", "주식호가"]:
+            data = self._parse_hoga_data(sCode, sRealData)
+        else:
+            return
+        
+        # 콜백 실행
+        if 'on_receive_real_data' in self.callbacks:
+            self.callbacks['on_receive_real_data'](sCode, sRealType, data)
+```
+
+### 3. data_processor.py - 데이터 처리 엔진
+```python
+"""
+실시간 데이터 처리 및 36개 지표 계산
+"""
+from collections import deque
+import numpy as np
+import time
+from typing import Dict, Optional
+
+class IndicatorCalculator:
+    """36개 지표 실시간 계산"""
+    
+    def __init__(self, stock_code: str, buffer_size: int = 200):
+        self.stock_code = stock_code
+        self.buffer_size = buffer_size
+        
+        # 데이터 버퍼
+        self.price_buffer = deque(maxlen=buffer_size)
+        self.volume_buffer = deque(maxlen=buffer_size)
+        self.time_buffer = deque(maxlen=buffer_size)
+        self.high_buffer = deque(maxlen=buffer_size)
+        self.low_buffer = deque(maxlen=buffer_size)
+        
+    def update_tick_data(self, tick_data: Dict) -> Dict:
+        """틱 데이터 업데이트 및 지표 계산"""
+        # 시간과 가격 추출
+        current_time = int(tick_data.get('time', int(time.time() * 1000)))
+        current_price = float(tick_data.get('current_price', 0))
+        current_volume = int(tick_data.get('volume', 0))
+        
+        if current_price <= 0:
+            return {}
+        
+        # 버퍼 업데이트
+        self.price_buffer.append(current_price)
+        self.volume_buffer.append(current_volume)
+        self.time_buffer.append(current_time)
+        
+        # 36개 지표 계산
+        indicators = self._calculate_all_indicators(tick_data)
+        
+        return indicators
+    
+    def _calculate_all_indicators(self, tick_data: Dict) -> Dict:
+        """36개 지표 전체 계산"""
+        result = {
+            # 기본 데이터
+            'time': tick_data.get('time'),
+            'stock_code': self.stock_code,
+            'current_price': tick_data.get('current_price'),
+            'volume': tick_data.get('volume'),
+            
+            # 가격 지표
+            'ma5': self._calculate_ma(5),
+            'rsi14': self._calculate_rsi(14),
+            'disparity': self._calculate_disparity(),
+            'stoch_k': self._calculate_stochastic_k(14),
+            'stoch_d': self._calculate_stochastic_d(14, 3),
+            
+            # 볼륨 지표
+            'vol_ratio': self._calculate_volume_ratio(),
+            'z_vol': self._calculate_z_score_volume(),
+            'obv_delta': self._calculate_obv_delta(),
+            
+            # 호가 지표
+            'spread': self._calculate_spread(tick_data),
+            'bid_ask_imbalance': self._calculate_bid_ask_imbalance(tick_data),
+        }
+        
+        # 호가 데이터 추가
+        for i in range(1, 6):
+            result[f'ask{i}'] = tick_data.get(f'ask{i}', 0)
+            result[f'bid{i}'] = tick_data.get(f'bid{i}', 0)
+            if i <= 3:
+                result[f'ask{i}_qty'] = tick_data.get(f'ask{i}_qty', 0)
+                result[f'bid{i}_qty'] = tick_data.get(f'bid{i}_qty', 0)
+        
+        return result
+    
+    def _calculate_ma(self, period: int) -> float:
+        """이동평균 계산"""
+        if len(self.price_buffer) < period:
+            if len(self.price_buffer) > 0:
+                return sum(self.price_buffer) / len(self.price_buffer)
+            return 0
+        return sum(list(self.price_buffer)[-period:]) / period
+```
+
+---
+**업데이트**: 2025-08-30 Grok 접근 복원용 - Python 코드 포함
 **상태**: 프로덕션 레디 (실전 서버 테스트 완료)
