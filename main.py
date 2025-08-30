@@ -126,15 +126,8 @@ class KiwoomDataCollector:
     def connect_and_register(self) -> bool:
         """키움 연결 및 실시간 데이터 등록"""
         try:
-            # 🔒 자동 로그인 시도
-            self.logger.info("🔒 자동 로그인 확인 중...")
-            auto_login_enabled = self.kiwoom_client.enable_auto_login()
-            if auto_login_enabled:
-                self.logger.info("✅ 자동 로그인 활성화됨 - 로그인 창에서 Enter만 누르세요!")
-                self.kiwoom_client.auto_login()  # 정보 로드 및 표시
-            else:
-                self.logger.info("💡 수동 로그인 - 로그인 창에서 직접 입력하세요.")
-                self.logger.info("💡 자동 로그인 설정: python secure_helper.py")
+            # 수동 로그인만 사용
+            self.logger.info("💡 수동 로그인 - 로그인 창에서 직접 입력하세요.")
             
             # 키움 서버 연결
             self.logger.info("키움 서버 연결 시도...")
