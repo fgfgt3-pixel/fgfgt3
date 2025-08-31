@@ -1,0 +1,480 @@
+키움 OpenAPI+ 실시간 데이터 수집 시스템 - Python 코드 (텍스트 형식)
+
+이 파일은 Grok AI가 직접 복사해서 사용할 수 있도록 순수 텍스트로 작성된 Python 코드입니다.
+
+==================== MAIN.PY ====================
+
+import sys
+import time
+import signal
+import logging
+from datetime import datetime
+from typing import Dict, Any
+from PyQt5.QtCore import QTimer
+
+from config import TARGET_STOCKS, KiwoomConfig, DataConfig, TRCode, validate_config
+from kiwoom_client import KiwoomClient, SimpleTRManager, ConnectionMonitor
+from data_processor import DataProcessor, InvestorNetManager
+from csv_writer import BatchCSVWriter
+
+class KiwoomDataCollector:
+    def __init__(self, target_stocks: list = None):
+        self.target_stocks = target_stocks or TARGET_STOCKS
+        self.running = False
+        self.setup_logging()
+        self.logger = logging.getLogger(__name__)
+        
+        self.kiwoom_client = None
+        self.data_processor = None
+        self.csv_writer = None
+        self.tr_manager = None
+        self.connection_monitor = None
+        self.investor_manager = None
+        
+        self.start_time = None
+        self.tick_counts = {}
+        self.last_stats_time = time.time()
+    
+    def initialize_modules(self):
+        self.kiwoom_client = KiwoomClient()
+        self.tr_manager = SimpleTRManager(self.kiwoom_client)
+        self.connection_monitor = ConnectionMonitor(self.kiwoom_client)
+        self.investor_manager = InvestorNetManager(self.target_stocks)
+        self.data_processor = DataProcessor(self.target_stocks, self.kiwoom_client)
+        self.csv_writer = BatchCSVWriter(
+            base_dir=DataConfig.CSV_DIR,
+            batch_size=DataConfig.CSV_BATCH_SIZE
+        )
+        
+        self.kiwoom_client.set_realdata_callback(self.on_realdata_received)
+        self.kiwoom_client.set_tr_callback(self.on_tr_data_received)
+        self.data_processor.set_indicator_callback(self.on_indicators_calculated)
+        
+        return True
+    
+    def connect_and_register(self):
+        if not self.kiwoom_client.connect():
+            return False
+        
+        if not self.kiwoom_client.register_realdata(self.target_stocks):
+            return False
+        
+        for i, stock_code in enumerate(self.target_stocks):
+            QTimer.singleShot(i * 200, lambda sc=stock_code: self.tr_manager.request_opt10059(sc))
+        
+        return True
+    
+    def on_realdata_received(self, stock_code, real_type, real_data):
+        if real_type == "주식체결":
+            self.data_processor.process_tick_data(stock_code, real_data)
+            self.tick_counts[stock_code] = self.tick_counts.get(stock_code, 0) + 1
+        elif real_type in ["주식호가잔량", "주식호가"]:
+            self.data_processor.update_hoga_data(stock_code, real_data)
+    
+    def on_indicators_calculated(self, stock_code, indicators):
+        self.csv_writer.write_indicators(stock_code, indicators)
+    
+    def run(self):
+        if not self.initialize_modules():
+            return
+        
+        if not self.connect_and_register():
+            return
+        
+        self.connection_monitor.start()
+        self.running = True
+        self.start_time = time.time()
+        self.app.exec_()
+
+==================== KIWOOM_CLIENT.PY ====================
+
+from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QAxContainer import QAxWidget  
+from PyQt5.QtCore import QEventLoop, QTimer
+
+class KiwoomClient:
+    def __init__(self):
+        self.app = QApplication.instance()
+        if self.app is None:
+            self.app = QApplication(sys.argv)
+        
+        self.window = QWidget()
+        self.window.setWindowTitle("Kiwoom OpenAPI Data Collector")
+        self.window.resize(100, 100)
+        self.window.hide()
+        
+        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1", self.window)
+        
+        self.connected = False
+        self.registered_stocks = set()
+        
+        self.realdata_callback = None
+        self.tr_callback = None
+        
+        self.setup_events()
+    
+    def setup_events(self):
+        self.ocx.OnEventConnect.connect(self._on_event_connect)
+        self.ocx.OnReceiveRealData.connect(self._on_receive_real_data)
+        self.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
+    
+    def connect(self):
+        err = self.ocx.dynamicCall("CommConnect()")
+        if err != 0:
+            return False
+        
+        self.login_event_loop = QEventLoop()
+        self.login_event_loop.exec_()
+        
+        return self.connected
+    
+    def register_realdata(self, stocks):
+        SCREEN_BASE_TRADE = "5000"
+        SCREEN_BASE_HOGA = "6000"
+        
+        for idx, stock_code in enumerate(stocks):
+            self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", stock_code)
+            time.sleep(0.05)
+            
+            screen_trade = f"{SCREEN_BASE_TRADE}{idx:02d}"
+            ret = self.ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                screen_trade,
+                stock_code,
+                "10;11;12;13;14;15;16;17;18;20",
+                "0" if idx == 0 else "1"
+            )
+            
+            screen_hoga = f"{SCREEN_BASE_HOGA}{idx:02d}"
+            ret = self.ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                screen_hoga,
+                stock_code,
+                "41;42;43;44;45;51;52;53;54;55",
+                "1"
+            )
+            
+            self.registered_stocks.add(stock_code)
+        
+        return True
+    
+    def _on_receive_real_data(self, sCode, sRealType, sRealData):
+        if sRealType == "주식체결":
+            data = self._parse_trade_data(sCode, sRealData)
+        elif sRealType in ["주식호가잔량", "주식호가"]:
+            data = self._parse_hoga_data(sCode, sRealData)
+        else:
+            return
+        
+        if self.realdata_callback:
+            self.realdata_callback(sCode, sRealType, data)
+    
+    def _parse_trade_data(self, stock_code, real_data):
+        data = {
+            'time': self.get_comm_real_data(stock_code, 20),
+            'current_price': abs(int(self.get_comm_real_data(stock_code, 10))),
+            'volume': int(self.get_comm_real_data(stock_code, 15)),
+            'high_price': abs(int(self.get_comm_real_data(stock_code, 17))),
+            'low_price': abs(int(self.get_comm_real_data(stock_code, 18))),
+        }
+        return data
+
+class SimpleTRManager:
+    def __init__(self, kiwoom_client):
+        self.kiwoom_client = kiwoom_client
+        self.last_request_times = {}
+        self.pending_requests = {}
+        self.request_timers = {}
+    
+    def request_opt10059(self, stock_code):
+        current_time = time.time()
+        tr_code = "OPT10059"
+        
+        if tr_code in self.last_request_times:
+            elapsed = current_time - self.last_request_times[tr_code]
+            if elapsed < 60:
+                delay = int((60 - elapsed) * 1000)
+                QTimer.singleShot(delay, lambda: self.request_opt10059(stock_code))
+                return False
+        
+        self.kiwoom_client.ocx.dynamicCall(
+            "SetInputValue(QString, QString)",
+            "종목코드", stock_code
+        )
+        
+        ret = self.kiwoom_client.ocx.dynamicCall(
+            "CommRqData(QString, QString, int, QString)",
+            f"투자자별매매상황_{stock_code}",
+            tr_code,
+            0,
+            "7000"
+        )
+        
+        if ret == 0:
+            self.last_request_times[tr_code] = current_time
+            QTimer.singleShot(60000, lambda: self.request_opt10059(stock_code))
+        
+        return ret == 0
+
+class ConnectionMonitor:
+    def __init__(self, kiwoom_client):
+        self.kiwoom_client = kiwoom_client
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.check_connection)
+        self.last_check_time = time.time()
+    
+    def start(self):
+        self.monitor_timer.start(10000)
+    
+    def check_connection(self):
+        if not self.kiwoom_client.connected:
+            self.kiwoom_client.connect()
+            
+            if self.kiwoom_client.connected:
+                stocks = list(self.kiwoom_client.registered_stocks)
+                self.kiwoom_client.register_realdata(stocks)
+
+==================== DATA_PROCESSOR.PY ====================
+
+import numpy as np
+from collections import deque, defaultdict
+from typing import Dict, List, Optional
+
+class IndicatorCalculator:
+    def __init__(self, stock_code, kiwoom_client=None):
+        self.stock_code = stock_code
+        self.kiwoom_client = kiwoom_client
+        
+        self.price_buffer = deque(maxlen=200)
+        self.volume_buffer = deque(maxlen=200)
+        self.time_buffer = deque(maxlen=200)
+        self.high_buffer = deque(maxlen=200)
+        self.low_buffer = deque(maxlen=200)
+        self.bid_ask_buffer = deque(maxlen=100)
+        
+        self.prev_price = 0
+        self.prev_volume = 0
+        self.prev_obv = 0
+        self.rsi_gains = deque(maxlen=14)
+        self.rsi_losses = deque(maxlen=14)
+        
+        self.investor_net_data = {}
+        self.prev_investor_net = {}
+        
+        self.prev_day_high = 0
+        self.session_start_price = 0
+        self.last_update_time = 0
+    
+    def update_tick_data(self, tick_data):
+        current_time = int(tick_data.get('time', int(time.time() * 1000)))
+        current_price = float(tick_data.get('current_price', 0))
+        current_volume = int(tick_data.get('volume', 0))
+        
+        if current_price <= 0:
+            return {}
+        
+        current_high = float(tick_data.get('high_price', current_price))
+        current_low = float(tick_data.get('low_price', current_price))
+        
+        self.price_buffer.append(current_price)
+        self.volume_buffer.append(current_volume)
+        self.time_buffer.append(current_time)
+        self.high_buffer.append(current_high)
+        self.low_buffer.append(current_low)
+        
+        indicators = self._calculate_all_indicators(tick_data)
+        
+        return indicators
+    
+    def _calculate_all_indicators(self, tick_data):
+        result = {
+            'time': tick_data.get('time'),
+            'stock_code': self.stock_code,
+            'current_price': tick_data.get('current_price'),
+            'volume': tick_data.get('volume'),
+            
+            'ma5': self._calculate_ma(5),
+            'rsi14': self._calculate_rsi(14),
+            'disparity': self._calculate_disparity(),
+            'stoch_k': self._calculate_stochastic_k(14),
+            'stoch_d': self._calculate_stochastic_d(14, 3),
+            
+            'vol_ratio': self._calculate_volume_ratio(),
+            'z_vol': self._calculate_z_score_volume(),
+            'obv_delta': self._calculate_obv_delta(),
+            
+            'spread': self._calculate_spread(tick_data),
+            'bid_ask_imbalance': self._calculate_bid_ask_imbalance(tick_data),
+            
+            'accel_delta': self._calculate_acceleration_delta(),
+            'ret_1s': self._calculate_return_1s(),
+        }
+        
+        for i in range(1, 6):
+            result[f'ask{i}'] = tick_data.get(f'ask{i}', 0)
+            result[f'bid{i}'] = tick_data.get(f'bid{i}', 0)
+            if i <= 3:
+                result[f'ask{i}_qty'] = tick_data.get(f'ask{i}_qty', 0)
+                result[f'bid{i}_qty'] = tick_data.get(f'bid{i}_qty', 0)
+        
+        if self.investor_net_data:
+            result.update(self.investor_net_data)
+        
+        return result
+    
+    def _calculate_ma(self, period):
+        if len(self.price_buffer) < period:
+            if len(self.price_buffer) > 0:
+                return sum(self.price_buffer) / len(self.price_buffer)
+            return 0
+        return sum(list(self.price_buffer)[-period:]) / period
+    
+    def _calculate_rsi(self, period=14):
+        if len(self.price_buffer) < 2:
+            return 50.0
+        
+        if self.prev_price > 0:
+            change = self.price_buffer[-1] - self.prev_price
+            if change > 0:
+                self.rsi_gains.append(change)
+                self.rsi_losses.append(0)
+            else:
+                self.rsi_gains.append(0)
+                self.rsi_losses.append(abs(change))
+        
+        self.prev_price = self.price_buffer[-1]
+        
+        if len(self.rsi_gains) < period:
+            return 50.0
+        
+        avg_gain = sum(self.rsi_gains) / len(self.rsi_gains)
+        avg_loss = sum(self.rsi_losses) / len(self.rsi_losses)
+        
+        if avg_loss == 0:
+            return 100.0
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
+
+class DataProcessor:
+    def __init__(self, target_stocks, kiwoom_client):
+        self.target_stocks = target_stocks
+        self.kiwoom_client = kiwoom_client
+        
+        self.calculators = {}
+        for stock_code in target_stocks:
+            self.calculators[stock_code] = IndicatorCalculator(stock_code, kiwoom_client)
+        
+        self.indicator_callback = None
+    
+    def process_tick_data(self, stock_code, tick_data):
+        if stock_code not in self.calculators:
+            return
+        
+        indicators = self.calculators[stock_code].update_tick_data(tick_data)
+        
+        if indicators and self.indicator_callback:
+            self.indicator_callback(stock_code, indicators)
+    
+    def update_hoga_data(self, stock_code, hoga_data):
+        if stock_code not in self.calculators:
+            return
+        
+        self.calculators[stock_code].bid_ask_buffer.append(hoga_data)
+
+class InvestorNetManager:
+    def __init__(self, target_stocks):
+        self.target_stocks = target_stocks
+        
+        self.investor_data = defaultdict(dict)
+        self.prev_investor_data = defaultdict(dict)
+        
+        self.investor_types = [
+            '개인', '외인', '기관', '연기금', '투신',
+            '보험', '사모펀드', '은행', '국가', '기타법인', '프로그램'
+        ]
+    
+    def update_investor_data(self, stock_code, tr_data):
+        if stock_code in self.investor_data:
+            self.prev_investor_data[stock_code] = self.investor_data[stock_code].copy()
+        
+        new_data = {}
+        total_net = 0
+        
+        for investor_type in self.investor_types:
+            value = tr_data.get(investor_type, 0)
+            new_data[investor_type] = value
+            total_net += value
+        
+        new_data['total_investor_net'] = total_net
+        
+        self.investor_data[stock_code] = new_data
+        
+        return new_data
+
+==================== CSV_WRITER.PY ====================
+
+import csv
+import os
+from datetime import datetime
+from collections import defaultdict
+
+class BatchCSVWriter:
+    def __init__(self, base_dir="pure_websocket_data", batch_size=100):
+        self.base_dir = base_dir
+        self.batch_size = batch_size
+        
+        self.buffers = defaultdict(list)
+        self.file_paths = {}
+        self.csv_writers = {}
+        
+        os.makedirs(base_dir, exist_ok=True)
+        
+        self.columns = [
+            'time', 'stock_code', 'current_price', 'volume',
+            'ma5', 'rsi14', 'disparity', 'stoch_k', 'stoch_d',
+            'vol_ratio', 'z_vol', 'obv_delta',
+            'spread', 'bid_ask_imbalance',
+            'accel_delta', 'ret_1s',
+            'ask1', 'ask2', 'ask3', 'ask4', 'ask5',
+            'bid1', 'bid2', 'bid3', 'bid4', 'bid5',
+            'ask1_qty', 'ask2_qty', 'ask3_qty',
+            'bid1_qty', 'bid2_qty', 'bid3_qty',
+            '개인', '외인', '기관', '연기금', '투신',
+            '보험', '사모펀드', '은행', '국가', '기타법인', '프로그램',
+            'total_investor_net'
+        ]
+    
+    def write_indicators(self, stock_code, indicators):
+        self.buffers[stock_code].append(indicators)
+        
+        if len(self.buffers[stock_code]) >= self.batch_size:
+            self._flush_buffer(stock_code)
+    
+    def _flush_buffer(self, stock_code):
+        if not self.buffers[stock_code]:
+            return
+        
+        if stock_code not in self.file_paths:
+            date_str = datetime.now().strftime('%Y%m%d')
+            filename = f"{stock_code}_44indicators_realtime_{date_str}.csv"
+            self.file_paths[stock_code] = os.path.join(self.base_dir, filename)
+            
+            file_exists = os.path.exists(self.file_paths[stock_code])
+            if not file_exists:
+                with open(self.file_paths[stock_code], 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=self.columns)
+                    writer.writeheader()
+        
+        with open(self.file_paths[stock_code], 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=self.columns)
+            for row in self.buffers[stock_code]:
+                writer.writerow(row)
+        
+        self.buffers[stock_code].clear()
+    
+    def flush_all(self):
+        for stock_code in list(self.buffers.keys()):
+            self._flush_buffer(stock_code)
