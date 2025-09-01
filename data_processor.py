@@ -32,9 +32,9 @@ class IndicatorCalculator:
         self.volume_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
         self.time_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
         
-        # 고가/저가 버퍼 (Stochastic 계산용)
-        self.high_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
-        self.low_buffer = deque(maxlen=DataConfig.MAX_TICK_BUFFER)
+        # 고가/저가 버퍼 (Stochastic 계산용) - 14로 제한
+        self.high_buffer = deque(maxlen=14)
+        self.low_buffer = deque(maxlen=14)
         
         # 호가 데이터 버퍼
         self.bid_ask_buffer = deque(maxlen=100)  # 최근 100틱 호가
@@ -48,6 +48,10 @@ class IndicatorCalculator:
         
         # 스토캐스틱 계산용
         self.stoch_k_buffer = deque(maxlen=3)
+        
+        # 가속도 계산용 (time, price) 튜플 저장
+        self.accel_deque = deque(maxlen=3)
+        self.prev_accel = 0.0  # EMA smoothing용
         
         # ATR 계산용 (vol_ratio 개선용)
         self.atr_buffer = deque(maxlen=DataConfig.RSI14_WINDOW)  # 14기간 ATR
@@ -91,6 +95,9 @@ class IndicatorCalculator:
             self.price_buffer.append(current_price)
             self.volume_buffer.append(current_volume)
             self.time_buffer.append(current_time)
+            # high/low 데이터 fallback 처리 개선
+            current_high = float(tick_data.get('high_price', current_price))  # fallback to current_price
+            current_low = float(tick_data.get('low_price', current_price))
             self.high_buffer.append(current_high)
             self.low_buffer.append(current_low)
             
@@ -107,7 +114,6 @@ class IndicatorCalculator:
             
             # 상태 업데이트 (타입 보장)
             self.prev_close = self.prev_price  # 이전 종가를 ATR 계산용으로 저장
-            self.prev_price = float(current_price) if current_price else 0
             self.prev_volume = int(current_volume) if current_volume else 0
             self.last_update_time = current_time
             
@@ -187,7 +193,7 @@ class IndicatorCalculator:
         # ====================================================================
         # 5. 기타 지표 (2개)
         # ====================================================================
-        indicators['accel_delta'] = self._calculate_accel_delta()
+        indicators['accel_delta'] = self._calculate_accel_delta(current_time, current_price)
         indicators['ret_1s'] = self._calculate_ret_1s(current_time, current_price)
         
         # ====================================================================
@@ -283,35 +289,45 @@ class IndicatorCalculator:
     def _calculate_stoch_k(self, tick_data: Dict) -> float:
         """스토캐스틱 K (적절한 high/low 히스토리 사용)"""
         if len(self.high_buffer) < DataConfig.STOCH_WINDOW or len(self.low_buffer) < DataConfig.STOCH_WINDOW:
-            return 50.0
+            return np.nan  # 개선: 데이터 부족시 NaN 반환
         
         try:
-            # 최근 N틱의 고가, 저가
-            recent_highs = list(self.high_buffer)[-DataConfig.STOCH_WINDOW:]
-            recent_lows = list(self.low_buffer)[-DataConfig.STOCH_WINDOW:]
-            
+            # 최근 기간의 고가/저가
+            recent_highs = list(self.high_buffer)
+            recent_lows = list(self.low_buffer)
             highest_high = max(recent_highs)
             lowest_low = min(recent_lows)
             
             # 현재가
             current_price = float(tick_data.get('current_price', 0))
             
+            # 선택적 호가 통합으로 범위 확대
+            if IndicatorConfig.USE_HOGA_FOR_STOCH:
+                ask5 = float(tick_data.get('ask5', highest_high))  # fallback to current high
+                bid5 = float(tick_data.get('bid5', lowest_low))
+                highest_high = max(highest_high, ask5)
+                lowest_low = min(lowest_low, bid5)
+            
             if highest_high == lowest_low:
-                stoch_k = 50.0
-            else:
-                stoch_k = ((current_price - lowest_low) / (highest_high - lowest_low)) * 100
+                self.logger.debug(f"Stoch K: 무효 범위 (high=low={highest_high})")
+                return np.nan  # 개선: 범위 0일 때 NaN 반환
             
+            stoch_k = ((current_price - lowest_low) / (highest_high - lowest_low)) * 100
             self.stoch_k_buffer.append(stoch_k)
-            return float(stoch_k)
             
+            # 디버깅 로그 추가
+            self.logger.debug(f"Stoch K: high={highest_high}, low={lowest_low}, price={current_price}, k={stoch_k:.2f}")
+            
+            return float(stoch_k)
+        
         except Exception as e:
             self.logger.error(f"Stoch K 계산 실패: {e}")
-            return 50.0
+            return np.nan  # 개선: 오류시 NaN 반환
     
     def _calculate_stoch_d(self) -> float:
         """스토캐스틱 D (K의 3틱 이동평균)"""
         if len(self.stoch_k_buffer) < 3:
-            return 50.0
+            return np.nan  # 개선: 데이터 부족시 NaN 반환
         return float(np.mean(self.stoch_k_buffer))
     
     # ========================================================================
@@ -360,22 +376,30 @@ class IndicatorCalculator:
         return float((current_volume - mean_vol) / std_vol)
     
     def _calculate_obv_delta(self, current_price: float, current_volume: int) -> float:
-        """OBV 변화량"""
+        """OBV 변화량 - 수정 버전"""
         if self.prev_price == 0:
-            self.prev_obv = current_volume
-            return 0.0
-        
-        # OBV 계산
-        if current_price > self.prev_price:
-            new_obv = self.prev_obv + current_volume
-        elif current_price < self.prev_price:
-            new_obv = self.prev_obv - current_volume
+            self.prev_obv = 0  # 초기화 수정: current_volume 대신 0으로 시작 (누적 방지)
+            obv_delta = 0.0
         else:
-            new_obv = self.prev_obv
+            # OBV 계산 (표준 로직 유지)
+            if current_price > self.prev_price:
+                new_obv = self.prev_obv + current_volume
+            elif current_price < self.prev_price:
+                new_obv = self.prev_obv - current_volume
+            else:
+                new_obv = self.prev_obv
+            
+            obv_delta = new_obv - self.prev_obv  # 진짜 delta 계산
+            self.prev_obv = new_obv
         
-        obv_delta = new_obv - self.prev_obv
-        self.prev_obv = new_obv
+        # 업데이트 시점 수정: 계산 후 바로 prev_price 업데이트 (순서 문제 해결)
+        self.prev_price = current_price
         
+        # 에지 케이스: volume=0 시 delta=0 강제
+        if current_volume == 0:
+            obv_delta = 0.0
+        
+        self.logger.debug(f"OBV delta 계산: {obv_delta} (price: {current_price}, vol: {current_volume})")
         return float(obv_delta)
     
     # ========================================================================
@@ -406,7 +430,8 @@ class IndicatorCalculator:
             total_bid = 0
             total_ask = 0
             
-            for i in range(1, 6):
+            # 설정 가능한 호가 단계 사용
+            for i in range(1, IndicatorConfig.BIDASK_LEVELS + 1):
                 bid_qty = int(tick_data.get(f'bid{i}_qty', 0))
                 ask_qty = int(tick_data.get(f'ask{i}_qty', 0))
                 total_bid += bid_qty
@@ -414,9 +439,16 @@ class IndicatorCalculator:
             
             total = total_bid + total_ask
             if total == 0:
+                self.logger.warning(f"호가 잔량 전체 0: {self.stock_code}")
                 return 0.0
             
+            # 설정 가능한 부호 방향
             imbalance = (total_bid - total_ask) / total
+            if IndicatorConfig.BIDASK_SIGN_REVERSE:
+                imbalance = -imbalance  # 매도압력 양수로 변경
+            
+            # 디버깅 로그 추가
+            self.logger.debug(f"호가 불균형: bid={total_bid:,}, ask={total_ask:,}, imbalance={imbalance:.4f}")
             return float(imbalance)
             
         except Exception as e:
@@ -427,38 +459,74 @@ class IndicatorCalculator:
     # 기타 지표 계산 함수들
     # ========================================================================
     
-    def _calculate_accel_delta(self) -> float:
-        """가속도 변화 (가격 변화의 변화율)"""
-        if len(self.price_buffer) < 3:
+    def _calculate_accel_delta(self, current_time: int, current_price: float) -> float:
+        """가속도 변화: 3틱 2차 diff / time_diff, EMA smoothing."""
+        # deque 업데이트: (time, price) 튜플 추가
+        self.accel_deque.append((current_time, current_price))
+        
+        if len(self.accel_deque) < 3:
             return 0.0
         
-        prices = list(self.price_buffer)[-3:]
+        # 3틱 추출: 오래된 → 최근
+        t0, p0 = self.accel_deque[0]
+        t1, p1 = self.accel_deque[1]
+        t2, p2 = self.accel_deque[2]
         
-        # 1차 변화율
-        change1 = prices[1] - prices[0]
-        change2 = prices[2] - prices[1]
+        # 1차 diff
+        diff1 = p1 - p0
+        diff2 = p2 - p1
         
-        # 2차 변화율 (가속도)
-        acceleration = change2 - change1
+        # 2차 diff (가속도)
+        raw_accel = diff2 - diff1
         
-        return float(acceleration)
+        # time_diff scaling (ms → 초, 전체 기간)
+        time_diff_sec = (t2 - t0) / 1000.0 if t2 > t0 else 1e-6  # 0 방지
+        scaled_accel = raw_accel / time_diff_sec
+        
+        # EMA smoothing (α=0.3, 이전 accel 저장)
+        smoothed_accel = 0.3 * scaled_accel + (1 - 0.3) * self.prev_accel
+        self.prev_accel = smoothed_accel
+        
+        return float(smoothed_accel)
     
     def _calculate_ret_1s(self, current_time: int, current_price: float) -> float:
-        """1초 수익률"""
-        if not self.time_buffer or not self.price_buffer:
+        """1초 수익률: 1초 버킷 내 시작 vs 끝 가격 pct_change, time_diff scaling."""
+        if len(self.time_buffer) < 2:
             return 0.0
-        
-        # 1초 전 데이터 찾기
-        one_sec_ago = current_time - 1000  # 1초 = 1000ms
-        
+
+        one_sec_ago = current_time - 1000  # 1초 전 timestamp (ms)
+        bucket_prices = []  # 1초 버킷 내 가격들
+        bucket_times = []   # 1초 버킷 내 시간들
+
+        # 역순 루프로 1초 버킷 내 가격 수집 (효율적 검색)
         for i in range(len(self.time_buffer) - 1, -1, -1):
-            if self.time_buffer[i] <= one_sec_ago:
-                prev_price = self.price_buffer[i]
-                if prev_price > 0:
-                    return float((current_price - prev_price) / prev_price * 100)
-                break
-        
-        return 0.0
+            tick_time = self.time_buffer[i]
+            if tick_time < one_sec_ago:
+                break  # 1초 이전이면 중단
+            bucket_prices.append(self.price_buffer[i])
+            bucket_times.append(tick_time)
+
+        if len(bucket_prices) < 2:
+            return 0.0  # 버킷 내 데이터 부족
+
+        # 버킷 시작(가장 오래된) vs 끝(최신) 가격
+        start_price = bucket_prices[-1]  # 역순 수집이므로 마지막이 가장 오래됨
+        end_price = bucket_prices[0]     # 첫 번째가 가장 최근
+        if start_price <= 0:
+            return 0.0
+
+        # 기본 pct_change
+        pct_change = (end_price - start_price) / start_price
+
+        # time_diff scaling (버킷 실제 기간으로 조정, 초 단위)
+        start_time = bucket_times[-1]  # 버킷 시작 시간
+        time_diff_sec = (current_time - start_time) / 1000.0
+        if time_diff_sec > 0:
+            scaled_ret = pct_change / time_diff_sec  # 초당 변화율
+        else:
+            scaled_ret = pct_change
+
+        return float(scaled_ret * 100)  # % 단위
     
     def _calculate_investor_individual_indicators(self) -> dict:
         """수급 지표 11개 개별 계산 (CLAUDE.md 요구사항: 개별 컬럼으로 저장)"""
@@ -471,12 +539,32 @@ class IndicatorCalculator:
             'bank_net_vol', 'state_net_vol', 'other_net_vol', 'prog_net_vol'
         ]
         
-        # 각 수급 지표를 0으로 초기화 (TR 데이터가 없을 때)
-        for column in investor_columns:
-            investor_indicators[column] = 0.0
-        
-        # 실제 수급 데이터가 있으면 업데이트 (추후 TR 연동시)
-        # TODO: OPT10059 TR 데이터 연동 필요
+        # InvestorNetManager에서 최신 데이터 가져옴 (연동 구현)
+        if hasattr(self, 'investor_manager') and self.investor_manager:
+            csv_data = self.investor_manager.get_csv_data(self.stock_code)
+            
+            # CSV 컬럼명을 InvestorNetManager 키에 매핑
+            key_mapping = {
+                'indiv_net_vol': 'net_individual',
+                'foreign_net_vol': 'net_foreign', 
+                'inst_net_vol': 'net_institution',
+                'pension_net_vol': 'net_pension',
+                'trust_net_vol': 'net_investment',
+                'insurance_net_vol': 'net_insurance',
+                'private_fund_net_vol': 'net_private_fund',
+                'bank_net_vol': 'net_bank',
+                'state_net_vol': 'net_state',
+                'other_net_vol': 'net_other_corp',
+                'prog_net_vol': 'net_program'
+            }
+            
+            for column in investor_columns:
+                mapped_key = key_mapping.get(column, column)
+                investor_indicators[column] = csv_data.get(mapped_key, 0.0)
+        else:
+            # fallback: TR 데이터가 없을 때 0으로 초기화
+            for column in investor_columns:
+                investor_indicators[column] = 0.0
         
         return investor_indicators
     
@@ -704,41 +792,40 @@ class InvestorNetManager:
     
     def update_from_tr(self, stock_code, tr_data):
         """TR 응답 처리 - 누적값을 그대로 저장 (대체)"""
-        
+        # stock_code 검증
+        if not stock_code:
+            self.logger.error("❌ stock_code가 비어있음")
+            return
+            
         # 1. 이전값 백업 (delta 계산용)
         self.previous_net_vol[stock_code] = self.current_net_vol[stock_code].copy()
         
-        # 2. 새로운 누적값으로 대체 (parse_investor_data의 키 이름으로 수정)
+        # 2. 새로운 누적값으로 대체 (parse_investor_data의 키와 일치)
         self.current_net_vol[stock_code] = {
-            'individual': int(tr_data.get('indiv_net', 0)),      # parse_investor_data 키 맞춤
-            'foreign': int(tr_data.get('foreign_net', 0)),       # parse_investor_data 키 맞춤
-            'institution': int(tr_data.get('inst_net', 0)),      # parse_investor_data 키 맞춤
-            'pension': int(tr_data.get('pension_net', 0)),       # parse_investor_data 키 맞춤
-            'investment': int(tr_data.get('trust_net', 0)),      # parse_investor_data 키 맞춤
-            'insurance': int(tr_data.get('insurance_net', 0)),   # parse_investor_data 키 맞춤
-            'private_fund': int(tr_data.get('private_fund_net', 0)), # parse_investor_data 키 맞춤
-            'bank': int(tr_data.get('bank_net', 0)),            # parse_investor_data 키 맞춤
-            'state': int(tr_data.get('state_net', 0)),          # parse_investor_data 키 맞춤
-            'other_corp': int(tr_data.get('other_net', 0)),     # parse_investor_data 키 맞춤
-            'program': int(tr_data.get('prog_net', 0))          # parse_investor_data 키 맞춤
+            'individual': int(tr_data.get('indiv_net', 0)),
+            'foreign': int(tr_data.get('foreign_net', 0)),
+            'institution': int(tr_data.get('inst_net', 0)),
+            'pension': int(tr_data.get('pension_net', 0)),
+            'investment': int(tr_data.get('investment_net', 0)),
+            'insurance': int(tr_data.get('insurance_net', 0)),
+            'private_fund': int(tr_data.get('private_fund_net', 0)),
+            'bank': int(tr_data.get('bank_net', 0)),
+            'state': int(tr_data.get('state_net', 0)),
+            'other_corp': int(tr_data.get('other_corp_net', 0)),
+            'program': int(tr_data.get('prog_net', 0))  # 내외국인 데이터 (프로그램 아님)
         }
         
         # 3. 업데이트 시간 기록
         self.last_update_info[stock_code]['time'] = time.time()
         self.last_update_info[stock_code]['round'] += 1
         
-        # 상세 로깅 추가
-        total_vol = sum(self.current_net_vol[stock_code].values())
-        self.logger.info(f"💰 [수급업데이트완료] {stock_code} Round#{self.last_update_info[stock_code]['round']}")
-        self.logger.info(f"    └─ 개인:{self.current_net_vol[stock_code]['individual']:,}, 외인:{self.current_net_vol[stock_code]['foreign']:,}, 기관:{self.current_net_vol[stock_code]['institution']:,}")
-        self.logger.info(f"    └─ 총계:{total_vol:,}")
-        
-        # 0이 아닌 값이 있는지 확인
-        non_zero_count = sum(1 for v in self.current_net_vol[stock_code].values() if v != 0)
-        if non_zero_count > 0:
-            self.logger.info(f"🎉 [수급데이터발견] {non_zero_count}개 항목에서 0이 아닌 값 확인!")
+        # 업데이트 로깅 (0이 아닌 값만)
+        non_zero_items = {k: v for k, v in self.current_net_vol[stock_code].items() if v != 0}
+        if non_zero_items:
+            self.logger.info(f"✅ 수급 데이터 업데이트: {stock_code}, Round {self.last_update_info[stock_code]['round']}")
+            self.logger.info(f"   순매수 현황: {non_zero_items}")
         else:
-            self.logger.warning(f"⚠️ [수급데이터문제] 모든 수급 값이 0입니다. TR 데이터 확인 필요")
+            self.logger.warning(f"⚠️ {stock_code} - 모든 수급값이 0")
     
     def get_data_for_tick(self, stock_code):
         """틱마다 현재 저장된 값 반환"""

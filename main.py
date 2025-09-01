@@ -18,6 +18,7 @@ from config import (
 from kiwoom_client import KiwoomClient, SimpleTRManager, ConnectionMonitor
 from data_processor import DataProcessor, InvestorNetManager
 from csv_writer import BatchCSVWriter
+from system_monitor import ComprehensiveMonitor, create_crash_resistant_wrapper
 
 class KiwoomDataCollector:
     """
@@ -48,6 +49,9 @@ class KiwoomDataCollector:
         self.tr_manager: SimpleTRManager = None
         self.connection_monitor: ConnectionMonitor = None
         self.investor_manager: InvestorNetManager = None
+        
+        # 시스템 모니터링
+        self.system_monitor: ComprehensiveMonitor = None
         
         # 통계
         self.start_time = None
@@ -112,7 +116,18 @@ class KiwoomDataCollector:
             # 8. TR 관리자와 수급 관리자 연동 (콜백 대신 직접 참조)
             self.tr_manager.investor_manager = self.investor_manager
             
-            # 9. 통계 초기화
+            # 8.1. IndicatorCalculator와 InvestorNetManager 연동 (수급 지표 0 문제 해결)
+            for stock_code in self.target_stocks:
+                self.data_processor.calculators[stock_code].investor_manager = self.investor_manager
+            
+            # 9. 시스템 모니터링 초기화
+            self.logger.info("9. 시스템 모니터링 초기화")
+            self.system_monitor = ComprehensiveMonitor(
+                kiwoom_client=self.kiwoom_client,
+                csv_dir=DataConfig.CSV_DIR
+            )
+            
+            # 10. 통계 초기화
             for stock_code in self.target_stocks:
                 self.tick_counts[stock_code] = 0
             
@@ -152,6 +167,10 @@ class KiwoomDataCollector:
             self.logger.info("연결 모니터링 시작...")
             self.connection_monitor.start_monitoring()
             
+            # 시스템 모니터링 시작
+            self.logger.info("시스템 모니터링 시작...")
+            self.system_monitor.start_monitoring()
+            
             self.logger.info("연결 및 등록 완료")
             return True
             
@@ -166,11 +185,15 @@ class KiwoomDataCollector:
     # ========================================================================
     
     def on_realdata_received(self, stock_code: str, real_type: str, tick_data: Dict):
-        """실시간 데이터 수신 콜백"""
+        """실시간 데이터 수신 콜백 (크래시 방지 강화)"""
         try:
             # 데이터 수신 로그 (처음 10틱만)
             if self.tick_counts.get(stock_code, 0) < 10:
                 self.logger.info(f"[실시간데이터수신] {stock_code} - {real_type} - 가격: {tick_data.get('current_price', 'N/A')}")
+            
+            # 시스템 모니터링에 데이터 수신 알림
+            if self.system_monitor:
+                self.system_monitor.on_realdata_received(stock_code)
             
             # 데이터 프로세서로 전달
             self.data_processor.process_realdata(stock_code, real_type, tick_data)
@@ -179,7 +202,21 @@ class KiwoomDataCollector:
             self.tick_counts[stock_code] = self.tick_counts.get(stock_code, 0) + 1
             
         except Exception as e:
-            self.logger.error(f"실시간 데이터 처리 오류: {e}")
+            self.logger.error(f"💥 실시간 데이터 처리 오류: {e}")
+            import traceback
+            self.logger.error(f"스택트레이스: {traceback.format_exc()}")
+            
+            # 크리티컬 에러 시 시스템 모니터에 알림
+            if self.system_monitor:
+                try:
+                    self.system_monitor.crash_detector.crash_detected.emit('realdata_exception', {
+                        'stock_code': stock_code,
+                        'real_type': real_type,
+                        'exception': str(e),
+                        'traceback': traceback.format_exc()
+                    })
+                except:
+                    pass
     
     def on_tr_data_received(self, tr_code: str, tr_data: Dict):
         """TR 데이터 수신 콜백"""
@@ -352,6 +389,11 @@ class KiwoomDataCollector:
                 self.logger.info("CSV 버퍼 플러시...")
                 self.csv_writer.flush_all_buffers()
                 self.csv_writer.close_all()
+            
+            # 시스템 모니터링 종료
+            if self.system_monitor:
+                self.logger.info("시스템 모니터링 종료...")
+                self.system_monitor.stop_monitoring()
             
             # 키움 연결 종료
             if self.kiwoom_client:

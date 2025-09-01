@@ -77,6 +77,9 @@ class KiwoomClient:
         # 전일고가 데이터 저장
         self.prev_day_high = {}
         
+        # 호가 데이터 이전값 저장 (0 fallback 방지)
+        self.prev_hoga = {}
+        
         # 실시간 호가 데이터
         self.ask1 = {}
         self.bid1 = {}
@@ -369,9 +372,18 @@ class KiwoomClient:
                         # 더 안전한 값 선택 (비어있지 않은 값 우선)
                         raw_value = raw_value_int if raw_value_int.strip() else raw_value_str
                         
-                        # 전문가 권장: 부호 제거 및 안전 파싱
+                        # 호가 데이터 파싱 개선: 0 fallback 방지
                         cleaned_value = raw_value.strip().replace('+', '').replace('-', '') if raw_value else ''
-                        parsed_value = int(cleaned_value or 0) if cleaned_value else 0
+                        
+                        if not cleaned_value and stock_code in self.prev_hoga and field in self.prev_hoga[stock_code]:
+                            # 빈 값일 때 이전 값 유지
+                            parsed_value = self.prev_hoga[stock_code][field]
+                        else:
+                            parsed_value = int(cleaned_value or 0) if cleaned_value else 0
+                            # 이전 값 저장
+                            if stock_code not in self.prev_hoga:
+                                self.prev_hoga[stock_code] = {}
+                            self.prev_hoga[stock_code][field] = parsed_value
                         
                         data[field] = parsed_value
                         
@@ -565,24 +577,38 @@ class KiwoomClient:
         try:
             investor_data = {}
             
-            # OPT10059 실제 필드명 (전문가 분석 반영)
+            # rq_name에서 stock_code 추출 (형식: OPT10059_{stock_code}_{timestamp})
+            stock_code = rq_name.split('_')[1] if '_' in rq_name else ''
+            investor_data['stock_code'] = stock_code
+            
+            # 멀티 데이터 행 수 확인
+            repeat_cnt = self.ocx.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name)
+            self.logger.info(f"📊 [수급파싱시작] TR코드={tr_code}, 종목={stock_code}, 데이터행수={repeat_cnt}")
+            
+            if repeat_cnt <= 0:
+                self.logger.warning(f"⚠️ [수급데이터없음] {stock_code} - 데이터행수=0")
+                # 빈 데이터 반환
+                for key in ['indiv_net', 'foreign_net', 'inst_net', 'pension_net', 'trust_net', 
+                           'insurance_net', 'private_fund_net', 'bank_net', 'state_net', 'other_net', 'prog_net']:
+                    investor_data[key] = 0
+                return investor_data
+            
+            # OPT10059 실제 필드명 (키움 공식 문서 기준)
             fields = {
                 'indiv_net': '개인투자자',
                 'foreign_net': '외국인투자자', 
                 'inst_net': '기관계',
                 'pension_net': '연기금등',
                 'trust_net': '투신',
-                'insurance_net': '보험', 
+                'insurance_net': '보험',
                 'private_fund_net': '사모펀드',
                 'bank_net': '은행',
                 'state_net': '국가',
                 'other_net': '기타법인',
-                'prog_net': '내외국인'  # '프로그램'은 OPT10059에 없음
+                'prog_net': '내외국인'  # 참고: 프로그램 매매는 OPT10030에서 조회
             }
             
-            # 전문가 분석: 모든 필드별 원시값 출력 강화
-            self.logger.info(f"📊 [수급파싱시작] TR코드={tr_code}, 요청명={rq_name}")
-            
+            # 가장 최신 데이터(index 0) 파싱
             for key, field_name in fields.items():
                 try:
                     raw_value = self.ocx.dynamicCall(
@@ -590,34 +616,43 @@ class KiwoomClient:
                         tr_code, rq_name, 0, field_name
                     )
                     
-                    # 전문가 권장: raw 값 완전 로깅
-                    self.logger.info(f"🔍 [수급raw] '{field_name}': raw='{raw_value}' (길이={len(raw_value)})")
+                    # 원시값 로깅
+                    self.logger.debug(f"🔍 [수급raw] {field_name}: '{raw_value}'")
                     
-                    # 안전 파싱 (부호 및 콤마 처리)
-                    cleaned_value = raw_value.strip().replace(',', '') if raw_value else ''
-                    parsed_value = int(cleaned_value or 0) if cleaned_value else 0
+                    # 데이터 정제 (공백, 콤마, 부호 처리)
+                    if raw_value:
+                        cleaned_value = raw_value.strip().replace(',', '')
+                        # 부호 처리 (+/- 모두 허용)
+                        if cleaned_value.startswith('+'):
+                            cleaned_value = cleaned_value[1:]
+                        try:
+                            parsed_value = int(cleaned_value)
+                        except ValueError:
+                            parsed_value = 0
+                            self.logger.warning(f"⚠️ 파싱 실패: {field_name}='{cleaned_value}'")
+                    else:
+                        parsed_value = 0
                     
                     investor_data[key] = parsed_value
                     
-                    # 파싱 결과 로깅
-                    self.logger.info(f"    → cleaned='{cleaned_value}' → parsed={parsed_value}")
-                    
-                    # 실제 데이터 발견시 강조
+                    # 0이 아닌 값 발견시 강조 로깅
                     if parsed_value != 0:
-                        self.logger.info(f"💡 [수급데이터발견] {key}: {parsed_value}")
-                    
+                        self.logger.info(f"💡 [수급데이터발견] {stock_code} - {key}: {parsed_value:,}")
+                        
                 except Exception as e:
                     investor_data[key] = 0
                     self.logger.error(f"❌ [수급파싱오류] {key}({field_name}): {e}")
             
             # 총 순매수량 계산
-            investor_data['total_net'] = sum(investor_data.values())
+            investor_data['total_net'] = sum([v for k, v in investor_data.items() 
+                                              if k not in ['stock_code', 'total_net']])
             
+            self.logger.info(f"✅ [수급파싱완료] {stock_code} - 총순매수: {investor_data['total_net']:,}")
             return investor_data
             
         except Exception as e:
-            self.logger.error(f"수급 데이터 파싱 오류: {e}")
-            return {}
+            self.logger.error(f"❌ [수급파싱전체오류]: {e}", exc_info=True)
+            return {'stock_code': ''}
     
     def get_prev_day_high(self, stock_code: str):
         """전일고가 데이터 요청 (OPT10081 TR 사용)"""
@@ -776,39 +811,44 @@ class SimpleTRManager:
         return True
     
     def request_opt10059(self, stock_code):
-        """OPT10059 요청 (성공시에만 시간 기록)"""
+        """OPT10059 요청 (투자자별 일별 매매동향)"""
         if not self.can_request(stock_code):
             return False
-        
+            
         try:
-            # 전문가 분석: 완전한 TR 입력 파라미터 설정
-            today = datetime.now().strftime("%Y%m%d")
+            # OPT10059 입력값 설정 (키움 공식 문서 기준)
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "일자", "")  # 빈값=최근일자
             self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "종목코드", stock_code)
-            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "기준일자", today)
-            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "금액수량구분", "1")  # 1=수량, 2=금액
-            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "매매구분", "0")      # 0=순매수, 1=매수, 2=매도
-            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "단위구분", "1")      # 1=천주, 0=단주
-            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1")
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "금액수량구분", "2")  # 1=금액, 2=수량
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "매매구분", "0")  # 0=순매수
+            self.kiwoom.ocx.dynamicCall("SetInputValue(QString, QString)", "단위구분", "1")  # 1=단위(천주)
             
-            self.logger.info(f"📊 [OPT10059] 입력 파라미터: 종목={stock_code}, 일자={today}, 금액수량구분=1(수량), 매매구분=0(순매수), 단위구분=1(천주)")
+            self.logger.info(f"📊 [OPT10059 요청] 종목={stock_code}, 수량/순매수/천주단위")
             
-            screen_no = "5959"
-            self.kiwoom.screen_to_stock[screen_no] = stock_code  # screen_no -> stock_code 매핑 설정
-            
+            # 요청 실행
+            screen_no = f"5959"  # 고정 화면번호 사용
             req_name = f"OPT10059_{stock_code}_{int(time.time())}"
-            result = self.kiwoom.ocx.dynamicCall("CommRqData(QString, QString, int, QString)", req_name, "OPT10059", 0, screen_no)
+            
+            result = self.kiwoom.ocx.dynamicCall(
+                "CommRqData(QString, QString, int, QString)",
+                req_name, "OPT10059", 0, screen_no
+            )
             
             if result == 0:
-                # 성공 후에만 시간 기록
                 self.last_opt10059[stock_code] = time.time()
-                self.logger.info(f"OPT10059 요청 성공: {stock_code}")
+                self.logger.info(f"✅ OPT10059 요청 성공: {stock_code}")
                 return True
             else:
-                self.logger.error(f"OPT10059 요청 실패: {stock_code}, 코드: {result}")
+                error_msg = {
+                    -200: "시세과부하",
+                    -201: "조회전문작성실패",
+                    -202: "전문작성초기화실패"
+                }.get(result, f"알수없는오류({result})")
+                self.logger.error(f"❌ OPT10059 요청 실패: {stock_code} - {error_msg}")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"TR 실패: {e}")
+            self.logger.error(f"❌ [OPT10059 요청오류] {stock_code}: {e}", exc_info=True)
             return False
     
     def request_with_retry(self, stock_code):

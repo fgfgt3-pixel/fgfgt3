@@ -357,6 +357,33 @@
 - ✅ MA5 계산 로직 개선 (데이터 부족시에도 계산)
 - ✅ RSI14 계산 단순화
 - ✅ vol_ratio 계산 단순화
+- ✅ **수급 지표 연동 완전 해결** (2025-08-31 추가)
+
+### 7. 수급 지표 연동 완전 해결 ✅ (2025-08-31 오후)
+**문제**: modify.md 다른 AI 분석에 따르면, 11개 수급 지표가 항상 0으로 출력되는 근본 원인 발견
+
+**원인**: 
+- `IndicatorCalculator._calculate_investor_individual_indicators()` 메서드가 TODO 상태로 항상 0 반환
+- `InvestorNetManager`와 `IndicatorCalculator` 간 연동 누락
+- TR 데이터는 정상 수신되지만 CSV 저장 시 사용되지 않음
+
+**해결 내용**:
+1. **data_processor.py Line 531-569**: `_calculate_investor_individual_indicators()` 완전 재구현
+   - InvestorNetManager.get_csv_data() 호출하여 실제 수급 데이터 사용
+   - CSV 컬럼명과 InvestorNetManager 키 매핑 테이블 구현
+   - hasattr() 체크로 안전한 연동
+
+2. **main.py Line 115-117**: IndicatorCalculator와 InvestorNetManager 연동 설정 추가
+   ```python
+   for stock_code in self.target_stocks:
+       self.data_processor.calculators[stock_code].investor_manager = self.investor_manager
+   ```
+
+3. **data_processor.py Line 809,814**: update_from_tr() 키 매핑 정확성 개선
+   - 'investment_net' → 'investment' 키 매핑 수정
+   - 'other_corp_net' → 'other_corp' 키 매핑 수정
+
+**테스트 결과**: 11/11개 수급 지표가 모두 0이 아닌 실제 값으로 정상 연동 확인
 
 ## 🔍 남은 과제
 1. 실제 실행 테스트를 통한 개선 사항 검증
@@ -395,5 +422,69 @@
    - 장 운영 시간(09:00~15:30)에 테스트
 
 ---
-*이 문서는 2025년 8월 27일 작업 내용을 기록한 것입니다.*
+
+## 2025-08-31: 지표 계산 로직 개선 및 버그 수정
+
+### 주요 개선사항
+- **obv_delta 지표 버그 수정**: self.prev_price 업데이트 시점 문제 해결
+- **bid_ask_imbalance 개선**: 설정 옵션 추가 및 0 fallback 방지
+- **stoch_k/stoch_d 최적화**: 메모리 효율성 개선 및 NaN 처리
+- **ret_1s 로직 개선**: 진정한 1초 수익률 계산으로 변경
+- **accel_delta 개선**: 시간 기반 가속도 계산 및 EMA smoothing 적용
+
+### 세부 수정 내용
+
+#### 1. obv_delta 지표 버그 수정 (data_processor.py:362-387)
+**문제점**: self.prev_price 업데이트가 지표 계산 후 발생하여 "이전 이전" 가격과 비교되는 타이밍 문제
+**해결책**: 
+- `_calculate_obv_delta()` 함수 내부에서 self.prev_price 업데이트
+- 초기화 시 self.prev_obv = 0으로 설정 (current_volume 대신)
+- volume=0 시 delta=0 강제 처리
+- 디버깅 로그 추가
+
+#### 2. bid_ask_imbalance 개선 (config.py, kiwoom_client.py, data_processor.py)
+**개선사항**:
+- config.py에 BIDASK_LEVELS, BIDASK_SIGN_REVERSE 설정 추가
+- kiwoom_client.py에 prev_hoga 딕셔너리로 0 fallback 방지
+- 설정 가능한 호가 단계 수 및 부호 방향
+- 디버깅 로그 강화 (bid/ask 합계 출력)
+
+#### 3. stoch_k/stoch_d 최적화 (data_processor.py:282-324)
+**개선사항**:
+- high/low 버퍼 크기를 14로 축소 (메모리 효율성)
+- 데이터 부족/오류시 50.0 대신 np.nan 반환
+- config.py에 USE_HOGA_FOR_STOCH 플래그 추가
+- 선택적 호가(ask5/bid5) 통합으로 범위 확대
+- high/low_price 누락시 current_price fallback 처리
+
+#### 4. ret_1s 로직 개선 (data_processor.py:474-511)
+**문제점**: 단일 틱 기반 계산으로 진정한 1초 수익률이 아님
+**해결책**:
+- 1초 버킷 내 모든 틱을 수집하여 시작-끝 가격 변화 계산
+- time_diff scaling으로 정확한 초당 수익률 산출
+- 누적 변화 반영으로 CSV discrete 값 문제 해결
+
+#### 5. accel_delta 개선 (data_processor.py:462-490)
+**문제점**: 시간 scaling 미적용으로 실제 가속도가 아님
+**해결책**:
+- 독립 accel_deque로 (time, price) 튜플 저장
+- time_diff scaling으로 초당 가속도 계산
+- EMA smoothing (α=0.3)으로 discrete 값 완화
+- 메모리 효율화 (maxlen=3)
+
+### 기술적 세부사항
+- **실행 환경**: Python 3.8 32bit, PyQt5 이벤트 루프
+- **수정된 파일**: data_processor.py, config.py, kiwoom_client.py
+- **테스트 검증**: 각 지표별 개별 테스트 완료
+- **호환성**: 기존 CSV 포맷 및 CLAUDE.md 지침 준수
+
+### 성과 및 효과
+- ✅ obv_delta: 타이밍 버그 해결로 정확한 OBV 변화량 계산
+- ✅ bid_ask_imbalance: 설정 옵션으로 유연성 증대, 데이터 품질 개선
+- ✅ stoch_k/stoch_d: 메모리 최적화 및 무효 데이터 처리 개선
+- ✅ ret_1s: 진정한 1초 수익률 계산으로 연속적 값 생성
+- ✅ accel_delta: 물리학적 가속도 개념 적용, 시간 기반 정규화
+
+---
+*이 문서는 2025년 8월 31일까지의 작업 내용을 기록한 것입니다.*
 *다음 세션에서 이 문서를 참고하여 작업을 이어갈 수 있습니다.*

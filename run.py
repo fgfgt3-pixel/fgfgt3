@@ -65,20 +65,57 @@ def check_requirements():
     return True
 
 def run_main():
-    """메인 데이터 수집 프로그램 실행"""
+    """메인 데이터 수집 프로그램 실행 (크래시 분석 포함)"""
     try:
+        # 시스템 모니터링 모듈 체크
+        try:
+            from system_monitor import ComprehensiveMonitor
+            print("✓ 시스템 모니터링 모듈 로드됨")
+        except ImportError:
+            print("⚠️ system_monitor.py가 없습니다. 기본 모드로 실행합니다.")
+        
         from main import main
         print("\n키움 OpenAPI+ 데이터 수집 시작...")
+        print("🔍 크래시 분석 모니터링 활성화됨")
         print("종료하려면 Ctrl+C를 누르세요.\n")
-        main()
+        
+        # 프로그램 시작 시간 기록
+        import time
+        start_timestamp = time.time()
+        
+        # 메인 실행
+        result = main()
+        
+        # 종료 시간 및 종료 유형 분석
+        end_timestamp = time.time()
+        running_time = end_timestamp - start_timestamp
+        
+        print(f"\n프로그램 종료 분석:")
+        print(f"실행 시간: {running_time/60:.1f}분")
+        print(f"종료 시각: {time.strftime('%H:%M:%S', time.localtime(end_timestamp))}")
+        
+        if result is None:
+            print("❌ 예상치 못한 종료 (정상 리턴값 없음)")
+        elif result == 0:
+            print("✅ 정상 종료 (리턴값 0)")
+        else:
+            print(f"⚠️ 비정상 종료 (리턴값: {result})")
+            
+        return True
+        
     except ImportError as e:
         print(f"main.py 파일을 찾을 수 없습니다: {e}")
         return False
     except KeyboardInterrupt:
-        print("\n\n프로그램이 사용자에 의해 종료되었습니다.")
+        print("\n\n✅ 프로그램이 사용자에 의해 정상 종료되었습니다.")
         return True
+    except SystemExit as e:
+        print(f"\n💥 SystemExit 감지: {e}")
+        return False
     except Exception as e:
-        print(f"오류 발생: {e}")
+        print(f"\n💥 예상치 못한 오류 발생: {e}")
+        import traceback
+        print(f"스택트레이스:\n{traceback.format_exc()}")
         return False
 
 def run_test_connection():
@@ -144,6 +181,14 @@ def main():
     
     # 설정 확인 후 메인 실행
     if run_config_check():
+        # 진단 모드 체크
+        print("\n🔍 크래시 분석 기능이 활성화됩니다.")
+        print("- 메모리 사용량 모니터링")
+        print("- 연결 상태 실시간 체크") 
+        print("- 예외 발생 추적")
+        print("- 파일 권한 모니터링")
+        print("- 크래시 스냅샷 자동 저장")
+        
         run_main()
     else:
         print("\n설정 파일이 없어 프로그램을 실행할 수 없습니다.")
