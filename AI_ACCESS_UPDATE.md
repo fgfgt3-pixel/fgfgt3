@@ -1,12 +1,12 @@
 # AI_ACCESS_UPDATE.md
 <!-- AI 접근용 프로젝트 상태 복원 파일 - Grok 진입점 -->
 
-## 🤖 Grok을 위한 프로젝트 완전 가이드 (2025-08-31)
+## 🤖 Grok을 위한 프로젝트 완전 가이드 (2025-09-01)
 
 ### 📋 프로젝트 개요
 **키움 OpenAPI+ 실시간 데이터 수집 시스템**
 - 목적: 실시간 주식 틱 데이터 수집 및 44개 지표 계산
-- 상태: **완전 정상 작동** (2025-08-29 마지막 테스트 완료)
+- 상태: **크래시 분석 시스템 추가** (2025-09-01 업데이트)
 - 환경: Python 3.8 32비트 + PyQt5 + Windows 필수
 
 ### 🏗️ 핵심 파일 구조 및 역할
@@ -50,7 +50,15 @@
   - `SecureLoginHelper`: 인증 정보 암호화 관리
   - 메모리 보안: 사용 후 즉시 삭제
 
-#### 7. 개발 가이드
+#### 7. 시스템 모니터링 (NEW - 2025-09-01)
+- **`system_monitor.py`** - 크래시 분석 및 실시간 모니터링
+  - `SystemCrashDetector`: 메모리/CPU 사용량, 하트비트 모니터링
+  - `ConnectionStabilityMonitor`: 키움 연결 상태 실시간 체크
+  - `ExceptionTracker`: 모든 예외 발생 추적 및 로깅
+  - `FilePermissionMonitor`: CSV 파일 권한 및 디스크 공간 체크
+  - 크래시 시 자동 스냅샷 저장: `logs/crash_snapshot_YYYYMMDD_HHMMSS.log`
+
+#### 8. 개발 가이드
 - **`CLAUDE.md`** - AI 개발 지침서 (핵심 문서)
   - 프로젝트 전체 규칙 및 제약사항
   - 36개 지표 정의 ('수급 지표'는 11개 컬럼 확장)
@@ -109,12 +117,13 @@ logs/
 ├── kiwoom_client_20250829.log
 └── ...
 
-### 🔍 최근 테스트 결과 (2025-08-29)
-- **종목**: 161390 (한국타이어앤테크놀로지)
-- **데이터 수집**: 정상 (틱 데이터 실시간 수집)
+### 🔍 최근 테스트 결과 (2025-09-01)
+- **종목**: 10개 종목 동시 수집 성공
+- **데이터 수집**: 정상 (09:02~14:01, 약 5시간)
 - **지표 계산**: 44개 모두 정상
-- **CSV 저장**: 배치 저장 정상 작동
-- **수급 데이터**: OPT10059 TR 정상 수신
+- **CSV 저장**: Permission denied 오류로 중단 (09:22 이후)
+- **크래시 원인**: 14:01:21 갑작스런 종료 - 원인 미상
+- **해결책**: 시스템 모니터링 시스템 추가 (system_monitor.py)
 
 ### 🤖 GitHub 정보
 - **URL**: https://github.com/fgfgt3-pixel/fgfgt3
@@ -133,6 +142,9 @@ logs/
 - **TR 제한**: SimpleTRManager가 자동 관리
 - **데이터 누락**: rolling window(deque)로 히스토리 관리
 - **파일 권한**: logs/, pure_websocket_data/ 자동 생성
+- **크래시 분석**: SystemCrashDetector가 실시간 모니터링 (NEW)
+- **예외 추적**: ExceptionTracker가 모든 예외 로깅 (NEW)
+- **자동 스냅샷**: 크래시 시 logs/crash_snapshot_*.log 저장 (NEW)
 
 ---
 
