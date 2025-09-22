@@ -138,8 +138,11 @@ class KiwoomClient:
         self.logger.info("자동 로그인이 비활성화되었습니다. 수동으로 로그인해주세요.")
         return False
     
-    def connect(self) -> bool:
-        """키움 서버 연결"""
+    def connect(self, use_auto_login: bool = False) -> bool:
+        """키움 서버 연결
+        Args:
+            use_auto_login: True면 GUI 자동화로 로그인 시도
+        """
         if self.login_attempted:
             self.logger.warning("이미 로그인 시도 중입니다.")
             return self.connected
@@ -169,7 +172,30 @@ class KiwoomClient:
             # CommConnect 호출
             ret = self.ocx.dynamicCall("CommConnect()")
             if ret == 0:
-                self.logger.info("로그인 창이 열렸습니다. 수동으로 로그인해주세요.")
+                # 자동 로그인 옵션 확인
+                if use_auto_login:
+                    try:
+                        from auto_login_gui import KiwoomAutoLogin
+                        auto_login = KiwoomAutoLogin()
+                        self.logger.info("GUI 자동 로그인 시도...")
+                        
+                        # 로그인 창이 뜰 때까지 대기
+                        time.sleep(2)
+                        
+                        # 자동 로그인 실행 (별도 스레드로)
+                        from PyQt5.QtCore import QThread
+                        class AutoLoginThread(QThread):
+                            def run(self):
+                                auto_login.safe_auto_login()
+                        
+                        login_thread = AutoLoginThread()
+                        login_thread.start()
+                        
+                    except ImportError:
+                        self.logger.warning("auto_login_gui 모듈이 없습니다. 수동 로그인으로 진행합니다.")
+                        self.logger.info("로그인 창이 열렸습니다. 수동으로 로그인해주세요.")
+                else:
+                    self.logger.info("로그인 창이 열렸습니다. 수동으로 로그인해주세요.")
                 
                 # 타임아웃 설정 (30초)
                 QTimer.singleShot(30000, self.login_timeout)
@@ -278,13 +304,17 @@ class KiwoomClient:
                     self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", stock_code)
                     time.sleep(0.05)
                     
+                    # 첫 번째 종목인지 확인 (전체 종목 중 첫 번째)
+                    is_first = (idx == 0 and stock_idx == 0)
+                    reg_type = "0" if is_first else "1"
+                    
                     # 2. 체결 데이터 등록 (완전 별도 화면)
                     screen_trade = f"{SCREEN_BASE_TRADE}{idx:02d}{stock_idx:01d}"
                     basic_fid = OptimizedFID.BASIC_FID
-                    self.logger.info(f"📊 [체결등록] 화면={screen_trade}, 종목={stock_code}, FID={basic_fid}")
+                    self.logger.info(f"📊 [체결등록] 화면={screen_trade}, 종목={stock_code}, FID={basic_fid}, 타입={reg_type}")
                     ret1 = self.ocx.dynamicCall(
                         "SetRealReg(QString, QString, QString, QString)",
-                        screen_trade, stock_code, basic_fid, "0"  # 신규 등록
+                        screen_trade, stock_code, basic_fid, reg_type
                     )
                     
                     time.sleep(0.1)  # API 제한 방지
@@ -292,10 +322,10 @@ class KiwoomClient:
                     # 3. 호가 데이터 별도 화면 등록 (중요!)
                     screen_hoga = f"{SCREEN_BASE_HOGA}{idx:02d}{stock_idx:01d}"
                     hoga_fid = OptimizedFID.USE_ORDER_BOOK_FID
-                    self.logger.info(f"📈 [호가등록] 화면={screen_hoga}, 종목={stock_code}, FID={hoga_fid}")
+                    self.logger.info(f"📈 [호가등록] 화면={screen_hoga}, 종목={stock_code}, FID={hoga_fid}, 타입={reg_type}")
                     ret2 = self.ocx.dynamicCall(
                         "SetRealReg(QString, QString, QString, QString)",
-                        screen_hoga, stock_code, hoga_fid, "0"  # 신규 등록 (별도 화면)
+                        screen_hoga, stock_code, hoga_fid, reg_type
                     )
                     
                     time.sleep(0.1)  # 안정성 대기
@@ -325,6 +355,15 @@ class KiwoomClient:
         try:
             # 전문가 진단: 모든 real_type 상세 로깅
             self.logger.info(f"📡 [실시간수신] {stock_code}: real_type='{real_type}' (raw_data_len={len(real_data)})")
+            
+            # 실시간 데이터 수신 카운터 추가
+            if not hasattr(self, 'realdata_count'):
+                self.realdata_count = 0
+            self.realdata_count += 1
+            
+            # 100번마다 수신 상태 로그
+            if self.realdata_count % 100 == 0:
+                self.logger.info(f"✅ 실시간 데이터 {self.realdata_count}개 수신 완료")
             
             # 알려진 타입이 아닌 경우 경고
             known_types = ["주식체결", "주식호가", "주식호가잔량", "주식시세"]

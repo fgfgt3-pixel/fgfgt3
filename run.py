@@ -13,7 +13,7 @@ from pathlib import Path
 import struct
 
 # 32비트 Python 경로 설정
-PYTHON_32BIT = r"C:\python38_32bit\python.exe"
+PYTHON_32BIT = r"C:\Users\fgfgt\AppData\Local\Programs\Python\Python38-32\python.exe"
 
 # 64비트에서 실행된 경우 32비트로 재실행
 if struct.calcsize("P") * 8 == 64 and os.path.exists(PYTHON_32BIT):
@@ -51,9 +51,9 @@ def check_requirements():
     for module, package in required_modules.items():
         try:
             __import__(module)
-            print(f"✓ {module} 설치됨")
+            print(f"[OK] {module} 설치됨")
         except ImportError:
-            print(f"✗ {module} 미설치")
+            print(f"[X] {module} 미설치")
             missing_modules.append(package)
     
     if missing_modules:
@@ -70,13 +70,13 @@ def run_main():
         # 시스템 모니터링 모듈 체크
         try:
             from system_monitor import ComprehensiveMonitor
-            print("✓ 시스템 모니터링 모듈 로드됨")
+            print("[OK] 시스템 모니터링 모듈 로드됨")
         except ImportError:
-            print("⚠️ system_monitor.py가 없습니다. 기본 모드로 실행합니다.")
+            print("[WARNING] system_monitor.py가 없습니다. 기본 모드로 실행합니다.")
         
         from main import main
         print("\n키움 OpenAPI+ 데이터 수집 시작...")
-        print("🔍 크래시 분석 모니터링 활성화됨")
+        print("[INFO] 크래시 분석 모니터링 활성화됨")
         print("종료하려면 Ctrl+C를 누르세요.\n")
         
         # 프로그램 시작 시간 기록
@@ -95,11 +95,11 @@ def run_main():
         print(f"종료 시각: {time.strftime('%H:%M:%S', time.localtime(end_timestamp))}")
         
         if result is None:
-            print("❌ 예상치 못한 종료 (정상 리턴값 없음)")
+            print("[ERROR] 예상치 못한 종료 (정상 리턴값 없음)")
         elif result == 0:
-            print("✅ 정상 종료 (리턴값 0)")
+            print("[OK] 정상 종료 (리턴값 0)")
         else:
-            print(f"⚠️ 비정상 종료 (리턴값: {result})")
+            print(f"[WARNING] 비정상 종료 (리턴값: {result})")
             
         return True
         
@@ -107,13 +107,13 @@ def run_main():
         print(f"main.py 파일을 찾을 수 없습니다: {e}")
         return False
     except KeyboardInterrupt:
-        print("\n\n✅ 프로그램이 사용자에 의해 정상 종료되었습니다.")
+        print("\n\n[OK] 프로그램이 사용자에 의해 정상 종료되었습니다.")
         return True
     except SystemExit as e:
-        print(f"\n💥 SystemExit 감지: {e}")
+        print(f"\n[CRASH] SystemExit 감지: {e}")
         return False
     except Exception as e:
-        print(f"\n💥 예상치 못한 오류 발생: {e}")
+        print(f"\n[CRASH] 예상치 못한 오류 발생: {e}")
         import traceback
         print(f"스택트레이스:\n{traceback.format_exc()}")
         return False
@@ -182,7 +182,7 @@ def main():
     # 설정 확인 후 메인 실행
     if run_config_check():
         # 진단 모드 체크
-        print("\n🔍 크래시 분석 기능이 활성화됩니다.")
+        print("\n[INFO] 크래시 분석 기능이 활성화됩니다.")
         print("- 메모리 사용량 모니터링")
         print("- 연결 상태 실시간 체크") 
         print("- 예외 발생 추적")

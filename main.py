@@ -18,7 +18,8 @@ from config import (
 from kiwoom_client import KiwoomClient, SimpleTRManager, ConnectionMonitor
 from data_processor import DataProcessor, InvestorNetManager
 from csv_writer import BatchCSVWriter
-from system_monitor import ComprehensiveMonitor, create_crash_resistant_wrapper
+from system_monitor import ComprehensiveMonitor
+from market_scheduler import MarketScheduler
 
 class KiwoomDataCollector:
     """
@@ -52,6 +53,9 @@ class KiwoomDataCollector:
         
         # 시스템 모니터링
         self.system_monitor: ComprehensiveMonitor = None
+        
+        # 장 시작 스케줄러
+        self.market_scheduler: MarketScheduler = None
         
         # 통계
         self.start_time = None
@@ -127,6 +131,13 @@ class KiwoomDataCollector:
                 csv_dir=DataConfig.CSV_DIR
             )
             
+            # 10. 장 시작 스케줄러 초기화
+            self.logger.info("10. 장 시작 스케줄러 초기화")
+            self.market_scheduler = MarketScheduler(self.kiwoom_client)
+            self.market_scheduler.reconnect_signal.connect(self.on_reconnected)
+            self.market_scheduler.market_open_signal.connect(self.on_market_open)
+            self.market_scheduler.market_close_signal.connect(self.on_market_close)
+            
             # 10. 통계 초기화
             for stock_code in self.target_stocks:
                 self.tick_counts[stock_code] = 0
@@ -144,9 +155,10 @@ class KiwoomDataCollector:
             # 수동 로그인만 사용
             self.logger.info("💡 수동 로그인 - 로그인 창에서 직접 입력하세요.")
             
-            # 키움 서버 연결
+            # 키움 서버 연결 (자동 로그인 활성화)
             self.logger.info("키움 서버 연결 시도...")
-            if not self.kiwoom_client.connect():
+            # use_auto_login=True로 바꾸면 자동 로그인 사용
+            if not self.kiwoom_client.connect(use_auto_login=True):  # False=수동, True=자동
                 self.logger.error("키움 서버 연결 실패")
                 return False
             
@@ -163,9 +175,9 @@ class KiwoomDataCollector:
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(i * 200, lambda sc=stock_code: self.tr_manager.request_opt10059(sc))
             
-            # 연결 모니터링 시작
+            # 연결 모니터링 시작 (자동 재시작 시스템)
             self.logger.info("연결 모니터링 시작...")
-            self.connection_monitor.start_monitoring()
+            self.start_connection_monitor()
             
             # 시스템 모니터링 시작
             self.logger.info("시스템 모니터링 시작...")
@@ -179,6 +191,41 @@ class KiwoomDataCollector:
             return False
     
     
+    
+    # ========================================================================
+    # 자동 재시작 시스템
+    # ========================================================================
+    
+    def start_connection_monitor(self):
+        """연결 상태 모니터링 시작 (자동 재시작)"""
+        from PyQt5.QtCore import QTimer
+        
+        self.connection_timer = QTimer()
+        self.connection_timer.timeout.connect(self.check_connection_status)
+        self.connection_timer.start(10000)  # 10초마다 체크
+        self.logger.info("자동 재시작 시스템 활성화")
+    
+    def check_connection_status(self):
+        """연결 상태 확인"""
+        try:
+            state = self.kiwoom_client.ocx.dynamicCall("GetConnectState()")
+            
+            if state == 0:  # 연결 끊김
+                self.logger.error("🔴 연결 끊김 감지! 자동 재시작을 위해 프로그램을 종료합니다...")
+                
+                # 안전한 종료
+                import sys
+                self.connection_timer.stop()
+                
+                # 3초 후 종료 (재시작용 exit code)
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(3000, lambda: sys.exit(1))
+                
+        except Exception as e:
+            self.logger.error(f"연결 상태 확인 실패: {e}")
+            # 심각한 오류시에도 재시작
+            import sys
+            QTimer.singleShot(2000, lambda: sys.exit(1))
     
     # ========================================================================
     # 콜백 함수들
@@ -367,6 +414,95 @@ class KiwoomDataCollector:
         except Exception as e:
             self.logger.error(f"상태 리포트 오류: {e}")
     
+    def on_reconnected(self):
+        """재연결 성공 시 콜백"""
+        try:
+            self.logger.info("🔄 재연결 성공 - 실시간 데이터 재등록")
+            # 실시간 데이터 재등록
+            self.kiwoom_client.register_realdata(self.target_stocks)
+            # TR 매니저 재시작
+            if self.tr_manager:
+                self.tr_manager.start_scheduler()
+        except Exception as e:
+            self.logger.error(f"재연결 처리 오류: {e}")
+    
+    def on_market_open(self):
+        """정규장 시작 시 콜백 (9:00)"""
+        try:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            self.logger.info("=" * 60)
+            self.logger.info(f"🔔 [{current_time}] 정규장 시작!")
+            self.logger.info("데이터 수집 시간: 9:00 ~ 15:20")
+            self.logger.info("=" * 60)
+            
+            # 통계 초기화
+            self.start_time = time.time()
+            for stock_code in self.target_stocks:
+                self.tick_counts[stock_code] = 0
+            
+            # 연결 상태 확인 후 실시간 등록
+            if self.kiwoom_client.GetConnectState():
+                self.logger.info("실시간 데이터 등록 시작")
+                self.kiwoom_client.register_realdata(self.target_stocks)
+                
+                # TR 매니저 시작
+                if self.tr_manager:
+                    self.tr_manager.start_scheduler()
+            else:
+                self.logger.warning("연결 끊김 - 재연결 필요")
+                self.market_scheduler.start_reconnect()
+        except Exception as e:
+            self.logger.error(f"장 시작 처리 오류: {e}")
+    
+    def on_market_close(self):
+        """정규장 마감 시 콜백 (15:20)"""
+        try:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            self.logger.info("=" * 60)
+            self.logger.info(f"🔕 [{current_time}] 정규장 마감!")
+            self.logger.info("실시간 데이터 수집 중지")
+            self.logger.info("=" * 60)
+            
+            # 실시간 등록 해제
+            if self.kiwoom_client:
+                self.logger.info("실시간 데이터 등록 해제")
+                # 모든 종목 실시간 해제
+                for stock_code in self.target_stocks:
+                    self.kiwoom_client.DisconnectRealData(KiwoomConfig.SCREEN_NO_REALTIME)
+                
+                # TR 매니저 중지
+                if self.tr_manager:
+                    self.tr_manager.stop_scheduler()
+            
+            # CSV 버퍼 플러시
+            if self.csv_writer:
+                self.logger.info("CSV 버퍼 모두 저장")
+                self.csv_writer.flush_all_buffers()
+            
+            # 오늘 통계 출력
+            if self.start_time:
+                total_time = time.time() - self.start_time
+                total_ticks = sum(self.tick_counts.values())
+                
+                self.logger.info("=" * 50)
+                self.logger.info("오늘 수집 통계")
+                self.logger.info("=" * 50)
+                self.logger.info(f"수집 시간: {total_time / 60:.1f}분")
+                self.logger.info(f"총 틱 수: {total_ticks:,}개")
+                if total_time > 0:
+                    self.logger.info(f"평균 틱/분: {total_ticks / (total_time / 60):.1f}")
+                
+                for stock_code, count in sorted(self.tick_counts.items()):
+                    self.logger.info(f"  {stock_code}: {count:,}틱")
+                    
+            self.logger.info("=" * 50)
+            self.logger.info("다음 거래일 9:00까지 대기")
+            self.logger.info("시간외 거래 데이터는 수집하지 않습니다")
+            self.logger.info("=" * 50)
+            
+        except Exception as e:
+            self.logger.error(f"장 마감 처리 오류: {e}")
+    
     def signal_handler(self, signum, frame):
         """시그널 핸들러 (Ctrl+C 등)"""
         self.logger.info(f"\n시그널 수신: {signum}")
@@ -389,6 +525,11 @@ class KiwoomDataCollector:
                 self.logger.info("CSV 버퍼 플러시...")
                 self.csv_writer.flush_all_buffers()
                 self.csv_writer.close_all()
+            
+            # 스케줄러 정리
+            if self.market_scheduler:
+                self.logger.info("장 시작 스케줄러 종료...")
+                self.market_scheduler.cleanup()
             
             # 시스템 모니터링 종료
             if self.system_monitor:

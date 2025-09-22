@@ -38,6 +38,9 @@ nul
 .claude/
 
 # 🔒 개인 인증 정보 파일들 - 절대 유출 금지
+auto_restart.bat
+auto_login_gui.py
+login_config.enc
 local_config.py
 personal_config.py
 my_credentials.py
@@ -48,7 +51,10 @@ user_credentials.py
 *.secret
 *.cred
 *.auth
+*.enc
 *_credentials.*
 *_password.*
 *_auth.*
 *_login.*
+*auto_login*
+*auto_restart*
